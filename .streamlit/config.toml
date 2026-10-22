@@ -1,0 +1,54 @@
+# Paper in the light theme, ink in the dark theme, one deep-green accent.
+# Colors live on [theme.light] and [theme.dark] so the settings menu can
+# switch appearance. Fonts, radius, and padding sit on [theme] and apply
+# to both. Do not add keys that `streamlit config show` does not list.
+
+[theme]
+font = "'Source Sans 3':https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&display=swap"
+headingFont = "'Source Serif 4':https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@600;700&display=swap"
+codeFont = "'Source Code Pro':https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;500&display=swap"
+codeFontSize = "0.9rem"
+baseFontSize = 16
+baseFontWeight = 400
+headingFontSizes = ["2.15rem", "1.55rem", "1.2rem", "1.05rem", "1rem", "0.9rem"]
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+baseRadius = "0.5rem"
+buttonRadius = "0.4rem"
+showWidgetBorder = true
+linkUnderline = false
+paddingTop = "1.75rem"
+paddingBottom = "3rem"
+
+[theme.light]
+primaryColor = "#1B5E45"
+backgroundColor = "#F6F1E7"
+secondaryBackgroundColor = "#EBE4D4"
+textColor = "#2A261F"
+linkColor = "#1B5E45"
+borderColor = "#D3C9B6"
+codeBackgroundColor = "#E4EFE8"
+codeTextColor = "#1A4A34"
+redColor = "#A33B32"
+orangeColor = "#8F5A16"
+yellowColor = "#8A7014"
+blueColor = "#1E4E78"
+greenColor = "#1B5E45"
+violetColor = "#5C4D73"
+grayColor = "#5E584E"
+
+[theme.dark]
+primaryColor = "#1F7A50"
+backgroundColor = "#171614"
+secondaryBackgroundColor = "#24221E"
+textColor = "#F3EEE4"
+linkColor = "#9ED4B7"
+borderColor = "#3E392F"
+codeBackgroundColor = "#1E2823"
+codeTextColor = "#D5EDE0"
+redColor = "#E7A19A"
+orangeColor = "#E2B16A"
+yellowColor = "#E4D08A"
+blueColor = "#8EB6D4"
+greenColor = "#8FCBAA"
+violetColor = "#C4B4D4"
+grayColor = "#B7AFA2"
