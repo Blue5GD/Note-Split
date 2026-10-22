@@ -91,7 +91,9 @@ def _reject_bad_upload(examples, sources, photos, mode) -> None:
     if mode != "cards" and not examples:
         raise Stop("Upload at least one example note.")
     if not sources and not photos:
-        raise Stop("Upload a source: one .txt file, one PDF, or photos.")
+        raise Stop(
+            "Upload a source: one or more .txt files, one or more PDFs, or photos."
+        )
     if sources and photos:
         raise Stop(ONE_KIND)
     if sources and _mixes_pdf_and_txt(sources):
