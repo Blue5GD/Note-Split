@@ -2,17 +2,20 @@
 
 Uploads stay on the page until the button is clicked. The pipeline, including
 the example-note check and any photo reading, starts only inside that
-click. A later click, such as a download or an expander, reruns this
-script from the top and does not start the pipeline again.
+click. A later click, such as a download, an expander, or a checkbox,
+reruns this script from the top and does not start the pipeline again.
 
-A click that fails the upload check does not start a wait. Once a click
-gets past that check, the finish time is kept for this browser tab.
-Another click is refused for 60 seconds after the attempt ends. The
-note under the button counts those seconds down on its own.
+Two boxes choose a study note, flashcards, or both. Cards only does
+not read the example notes. A click with neither box checked is a
+local stop, like a missing file, and does not start a wait. Once a
+click gets past that check, the finish time is kept for this browser
+tab. Another click is refused for 60 seconds after the attempt ends.
+The note under the button counts those seconds down on its own.
 
-The stored result is written only after the package bytes come back.
-A failed later run does not replace it. The stored dict includes the
-style brief. The Style notes expander draws that brief. It is not a
+The stored result is written only after run_pipeline returns. A notes
+run has no card package. A failed later run does not replace the
+stored dict. When a note was written, that dict includes the style
+brief. The Style notes expander draws that brief. It is not a
 download.
 
 Two or more txt files, PDFs, or photos can be dragged into the order
@@ -71,14 +74,21 @@ def _seconds_left() -> int:
     return math.ceil(remaining)
 
 
-def _reject_bad_upload(examples, sources, photos) -> None:
-    """Stop if Run was clicked without a usable upload.
+def _reject_bad_upload(examples, sources, photos, mode) -> None:
+    """Stop if Run was clicked without a usable choice or upload.
 
     This runs before example notes are read and before the source is
     read. It looks at which kinds of files were chosen, not at their
     bytes. Several .txt files are fine. Several PDFs are fine.
+
+    A notes run, or a run that makes both, still needs at least one
+    example note. A cards run does not: it only reads the source.
+    Neither box checked is the same kind of stop as a missing file.
+    It is raised here, outside the wait.
     """
-    if not examples:
+    if mode not in ("both", "notes", "cards"):
+        raise Stop("Choose a study note, flashcards, or both.")
+    if mode != "cards" and not examples:
         raise Stop("Upload at least one example note.")
     if not sources and not photos:
         raise Stop("Upload a source: one .txt file, one PDF, or photos.")
@@ -333,6 +343,30 @@ def _show_order(files_in_default_order, state_key: str, drag_prefix: str, senten
     return _files_for_labels(files_in_default_order, order)
 
 
+def _preview_caption(mode: str, note, apkg_bytes, brief) -> str:
+    """The line under Preview.
+
+    It names only the downloads that are actually there. Style notes
+    are never a file, so that sentence is added only when the brief
+    is shown. mode is "both" when an older result has no mode key.
+    """
+    has_note = note is not None
+    has_deck = apkg_bytes is not None
+    if has_note and has_deck:
+        line = "Download the note and the deck, or read them here."
+    elif has_note:
+        line = "Download the note, or read it here."
+    elif has_deck:
+        line = "Download the deck, or read the cards here."
+    elif mode == "cards":
+        line = "Read the cards here."
+    else:
+        line = "Read the result here."
+    if brief is not None and brief != "":
+        line += " Style notes are not a download."
+    return line
+
+
 # set_page_config has to be the first Streamlit call. "centered" keeps
 # the form at a reading width. A wide layout is for dashboards.
 st.set_page_config(
@@ -366,29 +400,71 @@ def _show_cooldown() -> None:
 
 
 # The title and the boxes below are layout only. Choosing a file,
-# dragging, or opening a section reruns this script and does not call
-# the model. That call stays inside the button.
+# dragging, checking a box, or opening a section reruns this script
+# and does not call the model. That call stays inside the button.
 st.title("Note Split", icon=":material/menu_book:")
 st.markdown(
     "Upload notes you already like, plus one lecture or a set of paper pages. "
     "The study note is for understanding, and the cards are only the facts "
-    "you need word for word."
+    "you need word for word. You can make a study note, flashcards, or both, "
+    "and cards only uses the source, not the example notes."
 )
 
+# These two boxes only pick the mode. A narrow window stacks the
+# columns. A wide window keeps them side by side. Unchecking one
+# reruns the page and does not call the model.
 with st.container(border=True):
-    st.subheader("1. Example notes", icon=":material/description:")
-    st.caption(
-        "One or more Obsidian markdown files. These set the length and the habits of the new note."
-    )
-    examples = st.file_uploader(
-        "Example markdown notes",
-        type=["md"],
-        accept_multiple_files=True,
-        help="At least one .md file.",
-    )
+    st.subheader("1. What to make", icon=":material/checklist:")
+    note_col, card_col = st.columns(2, gap="medium")
+    with note_col:
+        # The icon is the heading, same as the typed-files heading.
+        # The checkbox label is the choice itself, so the words are
+        # not written twice.
+        make_note = st.checkbox(
+            ":material/article: **Study note**",
+            value=True,
+            key="make_note",
+        )
+        st.caption(
+            "The study note uses the example Obsidian files to copy their length and habits. "
+            "Unchecking it skips that work."
+        )
+    with card_col:
+        make_cards = st.checkbox(
+            ":material/style: **Flashcards**",
+            value=True,
+            key="make_cards",
+        )
+        st.caption(
+            "Flashcards are only the word-for-word facts. "
+            "Cards only does not read the example Obsidian files. It only reads the source."
+        )
 
 with st.container(border=True):
-    st.subheader("2. Source", icon=":material/upload_file:")
+    st.subheader("2. Example notes", icon=":material/description:")
+    # Cards only must not create the uploader. A later read of that
+    # widget would open the files. examples is an empty list instead,
+    # so the click below has nothing to decode.
+    if make_cards and not make_note:
+        examples = []
+        with st.container(border=True):
+            st.markdown(
+                "This run only reads the source. Example Obsidian markdown files "
+                "are not opened and are not sent to the model."
+            )
+    else:
+        st.caption(
+            "One or more Obsidian markdown files. These set the length and the habits of the new note."
+        )
+        examples = st.file_uploader(
+            "Example markdown notes",
+            type=["md"],
+            accept_multiple_files=True,
+            help="At least one .md file.",
+        )
+
+with st.container(border=True):
+    st.subheader("3. Source", icon=":material/upload_file:")
     st.caption("Exactly one kind. Use typed files or photos, not both.")
     # Two columns, because these boxes are alternatives. The page still
     # refuses a run that fills both.
@@ -426,7 +502,7 @@ with st.container(border=True):
         )
 
 with st.container(border=True):
-    st.subheader("3. Instruction", icon=":material/edit_note:")
+    st.subheader("4. Instruction", icon=":material/edit_note:")
     st.caption(
         "Optional. Empty is fine. Use this when the new note should differ from the examples."
     )
@@ -436,39 +512,81 @@ with st.container(border=True):
         height=120,
     )
 
+# The boxes map to the pipeline's mode string. Neither box is not a
+# mode. That click is stopped with the missing-file check, before the
+# wait. A run that includes a note uses the book icon. Cards only uses
+# the card icon.
+if make_note and make_cards:
+    run_mode = "both"
+    button_label = "Make the note and cards"
+    button_icon = ":material/auto_stories:"
+    spinner_text = "Writing the note and the cards. Several photos can take about a minute."
+elif make_note:
+    run_mode = "notes"
+    button_label = "Make the note"
+    button_icon = ":material/auto_stories:"
+    spinner_text = "Writing the note. Several photos can take about a minute."
+elif make_cards:
+    run_mode = "cards"
+    button_label = "Make the cards"
+    button_icon = ":material/style:"
+    spinner_text = "Writing the cards. Several photos can take about a minute."
+else:
+    run_mode = None
+    button_label = "Make the note and cards"
+    button_icon = ":material/auto_stories:"
+    spinner_text = "Writing the note and the cards. Several photos can take about a minute."
+
 # The button stays clickable during the wait. A disabled button does
 # not rerun the page by itself, so the wait would never end. The click
 # is refused in code while seconds are left.
 if st.button(
-    "Make the note and cards",
+    button_label,
     type="primary",
-    icon=":material/auto_stories:",
+    icon=button_icon,
     width="stretch",
 ):
     # A click during the wait must not read the notes or call the model.
     # The note under the button says how many seconds are left.
     if _seconds_left() == 0:
         try:
-            _reject_bad_upload(examples, sources, photos)
+            _reject_bad_upload(examples, sources, photos, run_mode)
             # Past the upload check, this attempt may call the model.
             # finally records the finish time on every way out, so the
-            # wait does not depend on a crash. A missing file never
-            # reaches this try, so it does not start the wait.
+            # wait does not depend on a crash. A missing file, or neither
+            # box checked, never reaches this try, so it does not start
+            # the wait.
             try:
-                with st.spinner(
-                    "Writing the note and the cards. Several photos can take about a minute."
-                ):
-                    example_files, example_notes = _example_text(examples)
-                    # Before the source is read, and before any photo is sent.
-                    check_example_notes(example_notes)
-                    # The lists above are already in the dragged order.
-                    source = _source_text(sources_to_read, photos_to_read)
-                    # run_pipeline returns only after the .apkg bytes exist.
-                    # Assigning that dict here is the first time a result is stored.
-                    # example_files is each upload, measured before the notes are joined.
-                    st.session_state["result"] = run_pipeline(
-                        example_notes, source, instruction, example_files
-                    )
+                with st.spinner(spinner_text):
+                    if run_mode == "cards":
+                        # Skip _example_text on this branch. A normal read
+                        # would still open those files, because getvalue()
+                        # reads each upload. Cards only must not open them,
+                        # and it must not call check_example_notes. The
+                        # empty string and None are placeholders. The
+                        # pipeline does not read example notes in this mode.
+                        source = _source_text(sources_to_read, photos_to_read)
+                        st.session_state["result"] = run_pipeline(
+                            "", source, instruction, None, mode="cards"
+                        )
+                    else:
+                        example_files, example_notes = _example_text(examples)
+                        # Before the source is read, and before any photo is sent.
+                        check_example_notes(example_notes)
+                        # The lists above are already in the dragged order.
+                        source = _source_text(sources_to_read, photos_to_read)
+                        # run_pipeline returns when the note is done. A both
+                        # run also waits for the .apkg bytes. Assigning that
+                        # dict here is the first time a result is stored.
+                        # example_files is each upload, measured before the notes are joined.
+                        # run_mode is "notes" or "both" in this branch.
+                        st.session_state["result"] = run_pipeline(
+                            example_notes,
+                            source,
+                            instruction,
+                            example_files,
+                            mode=run_mode,
+                        )
             finally:
                 # A normal variable is forgotten on every rerun. Streamlit
                 # starts this file over from the top on a click, so the
@@ -494,35 +612,49 @@ if _seconds_left() > 0:
 # on that rerun. The previous result stays until a later click finishes.
 if "result" in st.session_state:
     result = st.session_state["result"]
+    # A result saved before modes existed has no "mode" key. That run
+    # made a note and cards, so a missing mode counts as "both". A
+    # section is still skipped when its value is missing: no note
+    # download for cards only, no deck download for a note only.
+    mode = result.get("mode", "both")
+    note = result.get("note")
+    cards = result.get("cards")
+    brief = result.get("brief")
+    apkg_bytes = result.get("apkg_bytes")
     st.header("Preview", icon=":material/visibility:")
-    st.caption(
-        "Download the note and the deck, or read them here. Style notes are not a download."
-    )
-    # A horizontal container keeps the two downloads on one row.
-    with st.container(horizontal=True, gap="small"):
-        st.download_button(
-            "Download note.md",
-            data=result["note"],
-            file_name="note.md",
-            mime="text/markdown",
-            key="download_note",
-            icon=":material/download:",
-        )
-        st.download_button(
-            "Download cards.apkg",
-            data=result["apkg_bytes"],
-            file_name="cards.apkg",
-            mime="application/octet-stream",
-            key="download_apkg",
-            icon=":material/download:",
-        )
-    with st.expander("Note", expanded=True, icon=":material/article:"):
-        st.markdown(result["note"])
-    with st.expander("Cards", expanded=True, icon=":material/style:"):
-        for index, card in enumerate(result["cards"]):
-            if index > 0:
-                st.divider()
-            st.markdown(card["front"])
-            st.markdown(card["back"])
-    with st.expander("Style notes", expanded=False, icon=":material/ink_pen:"):
-        st.markdown(result["brief"])
+    st.caption(_preview_caption(mode, note, apkg_bytes, brief))
+    # A horizontal container keeps the downloads on one row. A missing
+    # file is left out, so the caption does not promise it either.
+    if note is not None or apkg_bytes is not None:
+        with st.container(horizontal=True, gap="small"):
+            if note is not None:
+                st.download_button(
+                    "Download note.md",
+                    data=note,
+                    file_name="note.md",
+                    mime="text/markdown",
+                    key="download_note",
+                    icon=":material/download:",
+                )
+            if apkg_bytes is not None:
+                st.download_button(
+                    "Download cards.apkg",
+                    data=apkg_bytes,
+                    file_name="cards.apkg",
+                    mime="application/octet-stream",
+                    key="download_apkg",
+                    icon=":material/download:",
+                )
+    if note is not None:
+        with st.expander("Note", expanded=True, icon=":material/article:"):
+            st.markdown(note)
+    if cards is not None:
+        with st.expander("Cards", expanded=True, icon=":material/style:"):
+            for index, card in enumerate(cards):
+                if index > 0:
+                    st.divider()
+                st.markdown(card["front"])
+                st.markdown(card["back"])
+    if brief is not None and brief != "":
+        with st.expander("Style notes", expanded=False, icon=":material/ink_pen:"):
+            st.markdown(brief)
