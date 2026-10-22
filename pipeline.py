@@ -1,18 +1,22 @@
-"""Run the three agents, and check their replies.
+"""Run the agents, and check their replies.
 
 check_example_notes runs before the summarizer and before the source
-is read. Empty notes, or notes past the character cap, raise Stop.
-That check does not call the model.
+is read, on the notes and both paths. Empty notes, or notes past the
+character cap, raise Stop. That check does not call the model.
+Cards-only mode skips it.
 
 measure_example_notes counts words, headings, and bullets. It does
 not call the model. Those numbers go to the summarizer and the drafter.
+Cards-only mode skips this too.
 
-run_pipeline then calls the summarizer, the drafter, and the
-card-creator, in that order. If the drafted note is much longer than
-the examples, the drafter is asked once to shorten it. The pipeline
-parses the card JSON, retries that call once if the JSON is bad,
-swaps math delimiters on a copy, and writes the .apkg. The cards it
-returns still use $ and $$.
+run_pipeline takes a mode. "both" calls the summarizer, the drafter,
+and the card-creator, in that order. "notes" stops after the drafter.
+"cards" calls only the card-creator. If the drafted note is much
+longer than the examples, the drafter is asked once to shorten it.
+The pipeline parses the card JSON, retries that call once if the JSON
+is bad, swaps math delimiters on a copy, and writes the .apkg.
+Notes-only mode does not write a package. The cards it returns still
+use $ and $$.
 
 swap_math_delimiters and parse_cards are the helpers those steps use.
 parse_cards does not call the model, and it does not write card text.
@@ -24,7 +28,12 @@ import re
 from anki_export import export_apkg
 from extract import MAX_SOURCE_CHARS
 from models import Stop, call_model
-from prompts import CARD_CREATOR_PROMPT, DRAFTER_PROMPT, SUMMARIZER_PROMPT
+from prompts import (
+    CARD_CREATOR_PROMPT,
+    CARD_CREATOR_SOURCE_ONLY,
+    DRAFTER_PROMPT,
+    SUMMARIZER_PROMPT,
+)
 
 
 def _display_math(match: re.Match[str]) -> str:
@@ -155,6 +164,8 @@ def check_example_notes(example_notes: str) -> None:
     It does not call the model. Notes that are empty or only spaces
     are the empty stop. Notes longer than MAX_SOURCE_CHARS are the
     too-long stop. That cap is the constant in extract.py.
+    Cards-only mode does not call this. That mode does not use
+    example notes.
     """
     if example_notes.strip() == "":
         raise Stop("The example notes were empty.")
@@ -301,27 +312,51 @@ def run_pipeline(
     source: str,
     instruction: str = "",
     example_files: list[str] | None = None,
+    mode: str = "both",
 ) -> dict:
     """Run the summarizer, the drafter, and the card-creator.
 
-    The example-note check is first. It runs before the summarizer
-    and it does not read the source. The source argument is the
-    string from extract.py. The page should call check_example_notes
-    before it calls extract.py, then call this with that same string.
+    mode chooses how much of that work runs. "both" is the full path.
+    The four-argument call leaves mode at "both", so the page keeps
+    today's behavior until it passes a mode. "notes" stops after a
+    successful draft. "cards" calls only the card-creator. Any other
+    mode raises Stop. A provider error is not caught, so it propagates
+    with no retry.
+
+    On the notes and both paths, the example-note check is first. It
+    runs before the summarizer and it does not read the source. The
+    source argument is the string from extract.py. The page should
+    call check_example_notes before it calls extract.py, then call
+    this with that same string.
 
     example_files is each uploaded note, before they are joined.
     Those separate notes are what the word counts measure. When the
     argument is omitted or empty, example_notes is measured as one
-    note, so the old three-argument call still works.
+    note, so the old three-argument call still works. Cards mode does
+    not measure them.
 
     If the drafted note is much longer than the examples, the drafter
-    is called once more to shorten it. A provider error is not caught,
-    so it propagates with no retry.
+    is called once more to shorten it. Notes mode includes that retry,
+    then stops. It does not call the card-creator.
 
-    Returns a dict with brief, note, cards, and apkg_bytes. cards
+    Returns a dict with mode, brief, note, cards, and apkg_bytes.
+    brief and note are None in cards mode. cards and apkg_bytes are
+    None in notes mode, because that mode never asked for cards. An
+    empty card list is different: the model ran and chose no cards,
+    and both mode and cards mode still write a package for it. cards
     still uses $ and $$. apkg_bytes is the package from a swapped copy.
     The brief is not written into the note.
     """
+    if mode not in ("both", "notes", "cards"):
+        raise Stop('The mode must be "both", "notes", or "cards".')
+
+    if mode == "cards":
+        # Example notes are only a style sample for the drafter. This
+        # mode does not write a note, so sending them would spend
+        # credits for nothing. example_notes is not read here.
+        cards = _recall_cards_from_source(source, instruction)
+        return _result(mode, brief=None, note=None, cards=cards)
+
     check_example_notes(example_notes)
 
     # Joining inserts a blank line between notes. Measuring the files
@@ -333,10 +368,47 @@ def run_pipeline(
 
     brief = _style_brief(example_notes, measured["text"])
     note = _draft_note(source, brief, instruction, measured)
-    cards = _recall_cards(source, note, instruction)
 
-    # Preview cards keep $ and $$. The package gets a new list whose
-    # fronts and backs use Anki delimiters. Nothing else changes.
+    if mode == "notes":
+        # The draft succeeded, including a length retry when one was
+        # needed. Do not call the card-creator after that.
+        return _result(mode, brief=brief, note=note, cards=None)
+
+    cards = _recall_cards(source, note, instruction)
+    return _result(mode, brief=brief, note=note, cards=cards)
+
+
+def _result(
+    mode: str,
+    brief: str | None,
+    note: str | None,
+    cards: list[dict[str, str]] | None,
+) -> dict:
+    """Build the dict every mode returns.
+
+    Notes mode passes cards=None and does not write a package. An
+    empty list is a real card result, so it still gets a package.
+    """
+    if cards is None:
+        package = None
+    else:
+        package = _package_cards(cards)
+    return {
+        "mode": mode,
+        "brief": brief,
+        "note": note,
+        "cards": cards,
+        "apkg_bytes": package,
+    }
+
+
+def _package_cards(cards: list[dict[str, str]]) -> bytes:
+    """Swap math on a copy and write the .apkg.
+
+    Preview cards keep $ and $$. The package gets a new list whose
+    fronts and backs use Anki delimiters. Nothing else changes.
+    An empty card list is still a package.
+    """
     swapped: list[dict[str, str]] = []
     for card in cards:
         swapped.append(
@@ -345,12 +417,7 @@ def run_pipeline(
                 "back": swap_math_delimiters(card["back"]),
             }
         )
-    return {
-        "brief": brief,
-        "note": note,
-        "cards": cards,
-        "apkg_bytes": export_apkg(swapped),
-    }
+    return export_apkg(swapped)
 
 
 def _style_brief(example_notes: str, measured_text: str) -> str:
@@ -419,22 +486,49 @@ def _recall_cards(
 ) -> list[dict[str, str]]:
     """Ask the card-creator for recall cards and parse the JSON.
 
+    This is the both-mode path. The finished note is in the message.
     The card-creator does not receive the style brief. If the reply
     does not parse, call once more with a reminder about backslashes.
     An empty reply fails the parse, so it uses that same one retry.
     A provider error is not a parse failure: it is not caught, so
     there is no retry. If the second reply also fails, raise Stop.
     """
-    reply = call_model(
-        _card_creator_text(source, note, instruction, remind=False)
+    return _ask_for_cards(
+        _card_creator_text(source, note, instruction, remind=False),
+        _card_creator_text(source, note, instruction, remind=True),
     )
+
+
+def _recall_cards_from_source(
+    source: str, instruction: str
+) -> list[dict[str, str]]:
+    """Ask for cards from the source and the optional instruction.
+
+    Example notes are only a style sample for the drafter. This mode
+    does not write a note, so sending them would spend credits for
+    nothing. The message has no finished note and no style brief.
+    The one-retry reminder is the same as the both-mode path.
+    """
+    return _ask_for_cards(
+        _card_creator_source_text(source, instruction, remind=False),
+        _card_creator_source_text(source, instruction, remind=True),
+    )
+
+
+def _ask_for_cards(first: str, retry: str) -> list[dict[str, str]]:
+    """Send one card prompt, then the reminder if the JSON is bad.
+
+    Building the reminder string does not call the model. The second
+    call happens only after CardParseError. A provider error is not
+    caught, so it is not a retry. If the second reply also fails,
+    raise Stop.
+    """
+    reply = call_model(first)
     try:
         return parse_cards(reply)
     except CardParseError:
         # The first reply was unusable. Ask once more. Do not invent cards.
-        reply = call_model(
-            _card_creator_text(source, note, instruction, remind=True)
-        )
+        reply = call_model(retry)
 
     try:
         return parse_cards(reply)
@@ -506,6 +600,28 @@ def _card_creator_text(
         + source
         + "\nFinished note:\n"
         + note
+        + "\nOptional instruction:\n"
+        + instruction
+    )
+    if remind:
+        text += "\n" + _CARD_RETRY_REMINDER
+    return text
+
+
+def _card_creator_source_text(
+    source: str, instruction: str, remind: bool
+) -> str:
+    """Build the cards-only message.
+
+    Example notes are only a style sample for the drafter. This mode
+    does not write a note, so sending them would spend credits for
+    nothing. The message is the source-only prompt, the source, and
+    the optional instruction. It has no finished-note section.
+    """
+    text = (
+        CARD_CREATOR_SOURCE_ONLY
+        + "\nSource:\n"
+        + source
         + "\nOptional instruction:\n"
         + instruction
     )
