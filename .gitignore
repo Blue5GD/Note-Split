@@ -16,3 +16,6 @@ venv/
 
 # Private build spec
 PLAN.md
+
+# Class background, not part of the app
+agents-slideshow.pdf
