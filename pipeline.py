@@ -3,20 +3,25 @@
 check_example_notes runs before the summarizer and before the source
 is read, on the notes and both paths. Empty notes, or notes past the
 character cap, raise Stop. That check does not call the model.
-Cards-only mode skips it.
+Cards-only mode skips it. A saved style also skips it, because that
+path never reads example notes.
 
 measure_example_notes counts words, headings, and bullets. It does
 not call the model. Those numbers go to the summarizer and the drafter.
-Cards-only mode skips this too.
+Cards-only mode skips this too, and a saved style reuses the numbers
+stored with its brief.
 
 run_pipeline takes a mode. "both" calls the summarizer, the drafter,
 and the card-creator, in that order. "notes" stops after the drafter.
-"cards" calls only the card-creator. If the drafted note is much
-longer than the examples, the drafter is asked once to shorten it.
-The pipeline parses the card JSON, retries that call once if the JSON
-is bad, swaps math delimiters on a copy, and writes the .apkg.
-Notes-only mode does not write a package. The cards it returns still
-use $ and $$.
+"cards" calls only the card-creator. A saved style replaces the
+summarizer with its stored brief. If the drafted note is much longer
+than the examples, the drafter is asked once to shorten it. A saved
+style with no measurements is not compared, so it gets no length
+retry. The pipeline asks for the card JSON with a strict schema,
+parses it, retries that call once if the reply has no usable cards,
+swaps math delimiters on a copy, and writes the .apkg. Notes-only
+mode does not write a package. The cards it returns still use $ and
+$$. Token counts go into the optional TokenUsage on every model call.
 
 swap_math_delimiters and parse_cards are the helpers those steps use.
 parse_cards does not call the model, and it does not write card text.
@@ -27,13 +32,38 @@ import re
 
 from anki_export import export_apkg
 from extract import MAX_SOURCE_CHARS
-from models import Stop, call_model
+from models import Stop, TokenUsage, call_model
 from prompts import (
     CARD_CREATOR_PROMPT,
     CARD_CREATOR_SOURCE_ONLY,
     DRAFTER_PROMPT,
     SUMMARIZER_PROMPT,
 )
+
+
+# The card-creator answers with one object that holds a cards list.
+# models.py sends this to the Responses API as a strict JSON schema, so
+# the provider is asked for this shape directly. parse_cards still
+# checks the reply, because a schema is a request, not a guarantee.
+CARDS_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "cards": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "front": {"type": "string"},
+                    "back": {"type": "string"},
+                },
+                "required": ["front", "back"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["cards"],
+    "additionalProperties": False,
+}
 
 
 def _display_math(match: re.Match[str]) -> str:
@@ -57,14 +87,23 @@ def swap_math_delimiters(text: str) -> str:
     \\(...\\) and \\[...\\] is unchanged, because these passes only
     look for $ signs. A single leftover $ stays. The input string
     itself is not edited; the swapped text is a new string.
+
+    Inline math must be tight: the text just inside each $ cannot
+    start or end with whitespace. That is how a spaced dollar amount
+    such as $5 and $10 is told apart from math, and those amounts are
+    left alone. The tradeoff is that "$ x $" is treated as currency,
+    not math. Display math is not affected by this rule.
     """
     # $$...$$ first, so the inline pass cannot cut a display block in half.
     # .*? is the math between one opening $$ and the next $$. DOTALL lets
     # that math include newlines.
     swapped = re.sub(r"\$\$(.*?)\$\$", _display_math, text, flags=re.DOTALL)
     # $...$ second. [^$\n] stops the span at a dollar or a newline, so
-    # $a$ and $b$ is two spans, and a span never crosses a line.
-    swapped = re.sub(r"\$([^$\n]+?)\$", _inline_math, swapped)
+    # $a$ and $b$ is two spans, and a span never crosses a line. The
+    # two whitespace guards say the opening $ is not followed by a
+    # space or another $, and the closing $ is not preceded by one.
+    # Without those guards, "It costs $5 and $10." would become math.
+    swapped = re.sub(r"\$(?![\s$])([^$\n]*?[^\s$])\$", _inline_math, swapped)
     return swapped
 
 
@@ -140,11 +179,15 @@ def _is_opening_fence(line: str) -> bool:
 
 
 # The second card-creator call adds this. The first call does not.
-# The example JSON is already in the prompt above this line.
+# The reply is requested as strict JSON, so a broken schema shape is
+# unlikely. The usual failure is a parseable reply that has no usable
+# card: a missing cards list, or an empty front or back. The example
+# is already in the prompt above this line.
 _CARD_RETRY_REMINDER = (
-    "Reminder: double every LaTeX backslash, use \\n for a line break, "
-    "put no raw newline inside a string, return JSON only, and follow "
-    "the example above."
+    "Reminder: return one usable cards object that follows the example "
+    "above. The cards key must hold a list, and every card needs a "
+    "non-empty front string and a non-empty back string. Do not leave "
+    "either string empty or filled only with spaces."
 )
 
 
@@ -313,6 +356,11 @@ def run_pipeline(
     instruction: str = "",
     example_files: list[str] | None = None,
     mode: str = "both",
+    usage: TokenUsage | None = None,
+    style_brief: str | None = None,
+    style_measured_text: str | None = None,
+    style_median_words: float = 0.0,
+    style_longest_words: int = 0,
 ) -> dict:
     """Run the summarizer, the drafter, and the card-creator.
 
@@ -329,6 +377,14 @@ def run_pipeline(
     call check_example_notes before it calls extract.py, then call
     this with that same string.
 
+    A saved style skips that check, the measurement, and the
+    summarizer. style_brief is the saved brief, and the other three
+    style arguments are its saved numbers and measured text. They may
+    be empty or zero, because an older profile may have no
+    measurements. A blank saved brief raises Stop. When style_brief is
+    None, the example notes are measured and the summarizer writes a
+    new brief, as before.
+
     example_files is each uploaded note, before they are joined.
     Those separate notes are what the word counts measure. When the
     argument is omitted or empty, example_notes is measured as one
@@ -336,16 +392,24 @@ def run_pipeline(
     not measure them.
 
     If the drafted note is much longer than the examples, the drafter
-    is called once more to shorten it. Notes mode includes that retry,
-    then stops. It does not call the card-creator.
+    is called once more to shorten it. That retry runs only when the
+    median and longest counts are both positive. A saved style with no
+    measurements has nothing to compare against, so its first draft
+    is kept. Notes mode includes that retry, then stops. It does not
+    call the card-creator.
 
-    Returns a dict with mode, brief, note, cards, and apkg_bytes.
-    brief and note are None in cards mode. cards and apkg_bytes are
-    None in notes mode, because that mode never asked for cards. An
-    empty card list is different: the model ran and chose no cards,
-    and both mode and cards mode still write a package for it. cards
-    still uses $ and $$. apkg_bytes is the package from a swapped copy.
-    The brief is not written into the note.
+    usage, when given, collects the token counts from every model call
+    this run makes. A failed or cut-off call still adds its tokens.
+
+    Returns a dict with mode, brief, note, cards, apkg_bytes, and
+    measured. brief and note are None in cards mode, and measured is
+    None there too. cards and apkg_bytes are None in notes mode,
+    because that mode never asked for cards. The measured dict is what
+    the page can save with a style profile. An empty card list is
+    different from no cards: the model ran and chose no cards, and
+    both mode and cards mode still write a package for it. cards still
+    uses $ and $$. apkg_bytes is the package from a swapped copy. The
+    brief is not written into the note.
     """
     if mode not in ("both", "notes", "cards"):
         raise Stop('The mode must be "both", "notes", or "cards".')
@@ -353,29 +417,83 @@ def run_pipeline(
     if mode == "cards":
         # Example notes are only a style sample for the drafter. This
         # mode does not write a note, so sending them would spend
-        # credits for nothing. example_notes is not read here.
-        cards = _recall_cards_from_source(source, instruction)
-        return _result(mode, brief=None, note=None, cards=cards)
+        # credits for nothing. example_notes and any saved style are
+        # not read here.
+        cards = _recall_cards_from_source(source, instruction, usage=usage)
+        return _result(
+            mode, brief=None, note=None, cards=cards, measured=None
+        )
 
-    check_example_notes(example_notes)
+    if style_brief is None:
+        check_example_notes(example_notes)
 
-    # Joining inserts a blank line between notes. Measuring the files
-    # themselves keeps one word count per upload.
-    if not example_files:
-        measured = measure_example_notes([example_notes])
+        # Joining inserts a blank line between notes. Measuring the
+        # files themselves keeps one word count per upload.
+        if not example_files:
+            measured = measure_example_notes([example_notes])
+        else:
+            measured = measure_example_notes(example_files)
+
+        brief = _style_brief(example_notes, measured["text"], usage=usage)
     else:
-        measured = measure_example_notes(example_files)
+        # A saved profile already has a brief, so the notes are not
+        # checked or measured and the summarizer is not called.
+        brief, measured = _saved_style(
+            style_brief,
+            style_measured_text,
+            style_median_words,
+            style_longest_words,
+        )
 
-    brief = _style_brief(example_notes, measured["text"])
-    note = _draft_note(source, brief, instruction, measured)
+    note = _draft_note(source, brief, instruction, measured, usage=usage)
 
     if mode == "notes":
         # The draft succeeded, including a length retry when one was
         # needed. Do not call the card-creator after that.
-        return _result(mode, brief=brief, note=note, cards=None)
+        return _result(
+            mode, brief=brief, note=note, cards=None, measured=measured
+        )
 
-    cards = _recall_cards(source, note, instruction)
-    return _result(mode, brief=brief, note=note, cards=cards)
+    cards = _recall_cards(source, note, instruction, usage=usage)
+    return _result(
+        mode, brief=brief, note=note, cards=cards, measured=measured
+    )
+
+
+def _saved_style(
+    brief: str,
+    measured_text: str | None,
+    median_words: float,
+    longest_words: int,
+) -> tuple[str, dict]:
+    """Build the brief and measured dict from a saved style profile.
+
+    The saved brief is used as written. The example notes are not
+    checked, measured, or sent to the summarizer, so this path spends
+    no summarizer call. A blank brief is a missing result, so Stop is
+    raised before the drafter runs.
+
+    A stored profile may have no measurements. The fallback text tells
+    the drafter to follow the length in the brief, and the zero counts
+    tell _draft_note not to run the length retry. The dict keeps the
+    same keys as measure_example_notes, so the drafter reads it the
+    same way on both paths.
+    """
+    if brief.strip() == "":
+        raise Stop("The saved style is empty.")
+    if measured_text is not None and measured_text.strip() != "":
+        text = measured_text.strip()
+    else:
+        text = (
+            "No measured facts. Follow the length described in the "
+            "style brief."
+        )
+    return brief, {
+        "text": text,
+        "median_words": float(median_words or 0.0),
+        "longest_words": int(longest_words or 0),
+        "word_counts": [],
+    }
 
 
 def _result(
@@ -383,11 +501,15 @@ def _result(
     brief: str | None,
     note: str | None,
     cards: list[dict[str, str]] | None,
+    measured: dict | None,
 ) -> dict:
     """Build the dict every mode returns.
 
     Notes mode passes cards=None and does not write a package. An
     empty list is a real card result, so it still gets a package.
+    measured is the dict from the notes path, so the page can save a
+    style profile from this run. Cards mode passes None, because it
+    never measured example notes.
     """
     if cards is None:
         package = None
@@ -399,6 +521,7 @@ def _result(
         "note": note,
         "cards": cards,
         "apkg_bytes": package,
+        "measured": measured,
     }
 
 
@@ -420,20 +543,31 @@ def _package_cards(cards: list[dict[str, str]]) -> bytes:
     return export_apkg(swapped)
 
 
-def _style_brief(example_notes: str, measured_text: str) -> str:
+def _style_brief(
+    example_notes: str,
+    measured_text: str,
+    usage: TokenUsage | None = None,
+) -> str:
     """Ask the summarizer for a style brief.
 
     The summarizer sees the example notes and the measured facts.
     A blank reply is a missing result, so the drafter is not called.
+    usage, when given, collects this call's token counts.
     """
-    reply = call_model(_summarizer_text(example_notes, measured_text))
+    reply = call_model(
+        _summarizer_text(example_notes, measured_text), usage=usage
+    )
     if reply.strip() == "":
         raise Stop("The summarizer returned a blank reply.")
     return reply
 
 
 def _draft_note(
-    source: str, brief: str, instruction: str, measured: dict
+    source: str,
+    brief: str,
+    instruction: str,
+    measured: dict,
+    usage: TokenUsage | None = None,
 ) -> str:
     """Ask the drafter for the study note.
 
@@ -442,22 +576,31 @@ def _draft_note(
     wrote it. A blank note is a missing result, so the card-creator
     is not called.
 
-    A note much longer than the examples is sent back once. The second
-    reply is kept even if it is still long. A blank second reply stops.
-    A provider error on that call is not a length problem, so it is
-    not caught.
+    A note much longer than the examples is sent back once. That retry
+    runs only when the median and longest counts are both positive. A
+    saved style with no measurements has nothing to compare against,
+    so its first note is kept as it is. The second reply is kept even
+    if it is still long. A blank second reply stops. A provider error
+    on that call is not a length problem, so it is not caught.
+    usage, when given, collects the token counts from both calls.
     """
     reply = call_model(
-        _drafter_text(source, brief, instruction, measured["text"])
+        _drafter_text(source, brief, instruction, measured["text"]),
+        usage=usage,
     )
     note = _strip_one_fence(reply)
     if note.strip() == "":
         raise Stop("The drafter returned a blank reply.")
 
+    # A zero median or longest means this style has no measurements.
+    # That is not a request for a very short note, so do not retry.
+    median_words = float(measured["median_words"] or 0.0)
+    longest_words = int(measured["longest_words"] or 0)
+    if not (median_words > 0 and longest_words > 0):
+        return note
+
     draft_words = len(note.split())
-    if not draft_is_too_long(
-        draft_words, measured["median_words"], measured["longest_words"]
-    ):
+    if not draft_is_too_long(draft_words, median_words, longest_words):
         return note
 
     # One rewrite. Do not loop if this reply is still long.
@@ -470,10 +613,11 @@ def _draft_note(
             too_long_note=note,
             length_retry=_length_retry_instruction(
                 draft_words,
-                measured["median_words"],
-                measured["longest_words"],
+                median_words,
+                longest_words,
             ),
-        )
+        ),
+        usage=usage,
     )
     note = _strip_one_fence(reply)
     if note.strip() == "":
@@ -482,53 +626,81 @@ def _draft_note(
 
 
 def _recall_cards(
-    source: str, note: str, instruction: str
+    source: str,
+    note: str,
+    instruction: str,
+    usage: TokenUsage | None = None,
 ) -> list[dict[str, str]]:
     """Ask the card-creator for recall cards and parse the JSON.
 
     This is the both-mode path. The finished note is in the message.
-    The card-creator does not receive the style brief. If the reply
-    does not parse, call once more with a reminder about backslashes.
-    An empty reply fails the parse, so it uses that same one retry.
-    A provider error is not a parse failure: it is not caught, so
-    there is no retry. If the second reply also fails, raise Stop.
+    The card-creator does not receive the style brief. Both calls ask
+    for the cards schema. If the reply does not parse, call once more
+    with a reminder about a usable cards object. An empty reply fails
+    the parse, so it uses that same one retry. A provider error is not
+    a parse failure: it is not caught, so there is no retry. If the
+    second reply also fails, raise Stop. usage, when given, collects
+    the token counts from both calls.
     """
     return _ask_for_cards(
         _card_creator_text(source, note, instruction, remind=False),
         _card_creator_text(source, note, instruction, remind=True),
+        usage=usage,
     )
 
 
 def _recall_cards_from_source(
-    source: str, instruction: str
+    source: str,
+    instruction: str,
+    usage: TokenUsage | None = None,
 ) -> list[dict[str, str]]:
     """Ask for cards from the source and the optional instruction.
 
     Example notes are only a style sample for the drafter. This mode
     does not write a note, so sending them would spend credits for
     nothing. The message has no finished note and no style brief.
-    The one-retry reminder is the same as the both-mode path.
+    Both calls ask for the cards schema. The one-retry reminder is the
+    same as the both-mode path. usage, when given, collects the token
+    counts from both calls.
     """
     return _ask_for_cards(
         _card_creator_source_text(source, instruction, remind=False),
         _card_creator_source_text(source, instruction, remind=True),
+        usage=usage,
     )
 
 
-def _ask_for_cards(first: str, retry: str) -> list[dict[str, str]]:
-    """Send one card prompt, then the reminder if the JSON is bad.
+def _ask_for_cards(
+    first: str,
+    retry: str,
+    usage: TokenUsage | None = None,
+) -> list[dict[str, str]]:
+    """Send one card prompt, then the reminder if the reply is unusable.
 
-    Building the reminder string does not call the model. The second
-    call happens only after CardParseError. A provider error is not
-    caught, so it is not a retry. If the second reply also fails,
-    raise Stop.
+    Both calls pass the cards schema and ask the provider to name it
+    "cards". Building the reminder string does not call the model. The
+    second call happens only after CardParseError, which covers an
+    empty reply and a reply that parses but has no usable card. A
+    provider error is not caught, so it is not a retry. If the second
+    reply also fails, raise Stop. usage, when given, collects the token
+    counts from both calls.
     """
-    reply = call_model(first)
+    reply = call_model(
+        first,
+        response_schema=CARDS_RESPONSE_SCHEMA,
+        response_name="cards",
+        usage=usage,
+    )
     try:
         return parse_cards(reply)
     except CardParseError:
         # The first reply was unusable. Ask once more. Do not invent cards.
-        reply = call_model(retry)
+        reply = call_model(
+            retry,
+            response_schema=CARDS_RESPONSE_SCHEMA,
+            response_name="cards",
+            usage=usage,
+        )
 
     try:
         return parse_cards(reply)
