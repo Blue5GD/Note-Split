@@ -83,7 +83,7 @@ Return JSON only, with no code fence and no preamble. Imitate this example:
 
 {"cards": [{"front": "State the quadratic formula.", "back": "$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$"}]}
 
-Each front and each back is plain text plus math delimiters. Do not use markdown (**bold**, headings, bullets) or HTML. Anki renders the fields as HTML, so those marks would show as literal characters or as tags.
+Each front and each back is plain text plus math delimiters. Do not use markdown (**bold**, headings, bullets) or HTML. Anki renders the fields as HTML, so those marks would show as literal characters instead of formatting.
 
 Math inside front and back uses Obsidian delimiters: $...$ inline and $$...$$ for display. Do not use Anki delimiters \(...\) or \[...\]. Dollar signs need no escaping.
 
@@ -113,7 +113,7 @@ Return JSON only, with no code fence and no preamble. Imitate this example:
 
 {"cards": [{"front": "State the quadratic formula.", "back": "$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$"}]}
 
-Each front and each back is plain text plus math delimiters. Do not use markdown (**bold**, headings, bullets) or HTML. Anki renders the fields as HTML, so those marks would show as literal characters or as tags.
+Each front and each back is plain text plus math delimiters. Do not use markdown (**bold**, headings, bullets) or HTML. Anki renders the fields as HTML, so those marks would show as literal characters instead of formatting.
 
 Math inside front and back uses Obsidian delimiters: $...$ inline and $$...$$ for display. Do not use Anki delimiters \(...\) or \[...\]. Dollar signs need no escaping.
 

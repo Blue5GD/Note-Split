@@ -223,18 +223,47 @@ def delete_profile(name: str) -> bool:
     return True
 
 
+def _result_has_usable_text(result: dict) -> bool:
+    """True when Preview can draw the stored note, cards, and brief.
+
+    A hand-edited or older file can parse as JSON yet still hold the
+    wrong types. Preview indexes each card, so a card that is not a
+    dict with string fields would stop the page before Clear is drawn.
+    A bad value reads as no saved result instead.
+    """
+    for key in ("note", "brief"):
+        value = result.get(key)
+        if value is not None and not isinstance(value, str):
+            return False
+    cards = result.get("cards")
+    if cards is None:
+        return True
+    if not isinstance(cards, list):
+        return False
+    for card in cards:
+        if not isinstance(card, dict):
+            return False
+        if not isinstance(card.get("front"), str):
+            return False
+        if not isinstance(card.get("back"), str):
+            return False
+    return True
+
+
 def load_last_run() -> dict | None:
     """The last finished result, or None when there is no usable one.
 
     The stored package is base64 text. It is turned back into bytes
-    here. A missing package stays None. A file that is missing or
-    corrupt reads as None, so the page can simply run again.
+    here. A missing package stays None. A file that is missing, corrupt,
+    or the wrong shape reads as None, so the page can simply run again.
     """
     data = _read_json(LAST_RUN_FILE)
     if data is None:
         return None
     result = data.get("result")
     if not isinstance(result, dict):
+        return None
+    if not _result_has_usable_text(result):
         return None
 
     result = dict(result)

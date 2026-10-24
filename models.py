@@ -152,13 +152,20 @@ def call_model(
     if api_key is None or api_key.strip() == "":
         raise Stop("Set API_KEY in the .env file.")
 
-    client = OpenAI(api_key=api_key)
+    # max_retries=0 keeps the SDK from resending a failed request behind
+    # the page's back. The page already treats a provider error as final,
+    # and a hidden retry could spend credits that the call caption does
+    # not show.
+    client = OpenAI(api_key=api_key, max_retries=0)
     # The Responses API takes a JSON schema through text.format. This is
     # not the response_format parameter from Chat Completions.
+    # store=False asks the provider not to keep this response for later
+    # retrieval. It does not change the reply.
     request = {
         "model": MODEL,
         "input": _input(text, images),
         "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "store": False,
     }
     if response_schema is not None:
         request["text"] = {
@@ -177,9 +184,9 @@ def call_model(
             message = str(exc)
         raise ProviderError(message) from exc
 
-    # Count the tokens before the status checks. A cut-off reply was
-    # still paid work.
-    if usage is not None and response.usage is not None:
+    # Count the call before the status checks. A cut-off reply was still
+    # paid work, and a response with no usage object still made a call.
+    if usage is not None:
         usage.add(response.usage)
 
     # A cut-off reply is unfinished. Drop it. Do not read the partial text.

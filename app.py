@@ -632,35 +632,53 @@ def _show_usage(usage_data) -> None:
     st.caption(":material/payments: " + line, help=help_text)
 
 
-def _max_paid_calls(mode, style_choice, photo_count: int) -> int:
+def _max_paid_calls(
+    mode, style_choice, photo_count: int, length_retry: bool = True
+) -> int:
     """The most paid calls the current mode, style, and source can make.
 
-    The counts include the one card retry and the one drafter length
-    retry. A saved style skips the summarizer, so its count is one
-    lower. Each photo page is one vision call. No model call is made to
-    work this out.
+    The counts include the one card retry and, when length_retry is
+    true, the one drafter length retry. A saved style skips the
+    summarizer, so its count is one lower. A saved style with no
+    measurements cannot make the length retry, so pass False for it.
+    Each photo page is one vision call. No model call is made to work
+    this out.
     """
     if mode == "cards":
         base = 2
     elif mode == "notes":
-        base = 2 if style_choice == SAVED_STYLE else 3
+        if style_choice == SAVED_STYLE:
+            base = 2 if length_retry else 1
+        else:
+            base = 3
     elif mode == "both":
-        base = 4 if style_choice == SAVED_STYLE else 5
+        if style_choice == SAVED_STYLE:
+            base = 4 if length_retry else 3
+        else:
+            base = 5
     else:
         return 0
     return base + photo_count
 
 
-def _max_calls_help(mode, style_choice, photo_count: int) -> str:
+def _max_calls_help(
+    mode, style_choice, photo_count: int, length_retry: bool = True
+) -> str:
     """The breakdown behind the maximum call caption."""
     if mode == "cards":
         text = "Cards only: one card call and one retry."
     elif mode == "notes":
         if style_choice == SAVED_STYLE:
-            text = (
-                "Saved style: one drafter call and one length retry. "
-                "The summarizer is skipped."
-            )
+            if length_retry:
+                text = (
+                    "Saved style: one drafter call and one length retry. "
+                    "The summarizer is skipped."
+                )
+            else:
+                text = (
+                    "Saved style with no typical word count: one drafter "
+                    "call. The summarizer and the length retry are skipped."
+                )
         else:
             text = (
                 "Example notes: one summarizer call, one drafter call, "
@@ -668,10 +686,17 @@ def _max_calls_help(mode, style_choice, photo_count: int) -> str:
             )
     elif mode == "both":
         if style_choice == SAVED_STYLE:
-            text = (
-                "Saved style: one drafter call, one length retry, one "
-                "card call, and one card retry. The summarizer is skipped."
-            )
+            if length_retry:
+                text = (
+                    "Saved style: one drafter call, one length retry, one "
+                    "card call, and one card retry. The summarizer is skipped."
+                )
+            else:
+                text = (
+                    "Saved style with no typical word count: one drafter "
+                    "call, one card call, and one card retry. The "
+                    "summarizer and the length retry are skipped."
+                )
         else:
             text = (
                 "Example notes: one summarizer call, one drafter call, "
@@ -886,16 +911,35 @@ else:
 
 # The caption above the button is a spend guard, not an estimate from
 # the API. Each photo page is one vision call. The counts include the
-# card retry and the drafter length retry, so they are maximums.
+# card retry and the drafter length retry, so they are maximums. A
+# saved style with no measurements cannot make the length retry, so
+# its maximum is one lower.
 if run_mode is not None:
+    saved_has_target = (
+        selected_profile is not None
+        and float(selected_profile.median_words or 0.0) > 0
+        and int(selected_profile.longest_words or 0) > 0
+    )
+    length_retry = (
+        style_choice != SAVED_STYLE
+        or selected_profile is None
+        or saved_has_target
+    )
     max_calls = _max_paid_calls(
         run_mode,
         style_choice,
         len(photos_to_read),
+        length_retry=length_retry,
     )
+    call_word = "call" if max_calls == 1 else "calls"
     st.caption(
-        f":material/payments: Up to {max_calls} paid model calls for this run.",
-        help=_max_calls_help(run_mode, style_choice, len(photos_to_read)),
+        f":material/payments: Up to {max_calls} paid model {call_word} for this run.",
+        help=_max_calls_help(
+            run_mode,
+            style_choice,
+            len(photos_to_read),
+            length_retry=length_retry,
+        ),
     )
 
 # The button stays clickable during the wait. A disabled button does

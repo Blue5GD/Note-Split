@@ -20,11 +20,11 @@ A note needs a style source. You upload one or more example notes, or you choose
 
 If you upload photos, the app transcribes them one page at a time before those calls. That is one vision call per photo page. It only reads the page. It is not a fourth agent. It adds to the paid calls for the run.
 
-Some runs make more calls than the lists above. The drafter may be called once more when the note comes out much longer than the measured target, or than the typical word count saved with a style. The card-creator may be called once more when its reply has no usable cards. The page shows "Up to N paid model calls" above Run, and that number includes those possible retries and one call per photo page. The actual number depends on the replies.
+Some runs make more calls than the lists above. The drafter may be called once more when the note comes out much longer than the measured target, or than the typical word count saved with a style. A saved style with no typical word count has no measured target, so it cannot make that length retry. The card-creator may be called once more when its reply has no usable cards. The page shows "Up to N paid model calls" above Run, and that number includes the retries the current choices can make and one call per photo page. The actual number depends on the replies.
 
 - The summarizer reads your example markdown notes and writes a dense 300-450 word style contract. It covers length, headings, paragraph shape, lists and callouts, voice, math and notation, Obsidian markup, recurring patterns, and a short "do not" list. It also copies 2-4 short lines from your notes. It does not run when you choose a saved style, and it does not run in cards-only mode.
 - The drafter writes the Obsidian note from the source, the style brief, and an optional instruction. When the app measured example notes, the drafter uses the median word count as its target. A saved style with no measurements follows the length in the brief instead of inventing a median.
-- The card-creator returns only the recall cards. With both boxes checked, it reads the source and the finished note. With only Flashcards checked, it reads the source and the optional instruction. It asks the Responses API for strict JSON with a schema (`text.format` / `json_schema`), not Chat Completions `response_format`. The app still checks the reply and retries once if it has no usable cards, such as an empty front or back. That check is a safeguard, not a sign that JSON errors are expected.
+- The card-creator returns only the recall cards. With both boxes checked, it reads the source, the finished note, and the optional instruction. It does not receive the style brief. With only Flashcards checked, it reads the source and the optional instruction. It asks the Responses API for strict JSON with a schema (`text.format` / `json_schema`), not Chat Completions `response_format`. The app still checks the reply and retries once if it has no usable cards, such as an empty front or back. That check is a safeguard, not a sign that JSON errors are expected.
 
 ## What you need
 
@@ -86,7 +86,7 @@ Start the page:
 streamlit run app.py
 ```
 
-Streamlit opens a page in the browser and reruns the Python file when a widget is clicked. A widget is something on the page you click or type in, such as a button, a file box, or a text box. A widget click never calls the model. Only the Run button starts the pipeline.
+Streamlit opens a page in the browser and reruns the Python file when a widget is clicked. A widget is something on the page you click or type in, such as a button, a file box, or a text box. Changing a setting, opening a preview, or downloading a file does not call the model. Only the Run button starts the pipeline.
 
 ## How to use the page
 
@@ -115,7 +115,7 @@ A saved style is a named style summary stored on this computer. It holds the sty
 There are two ways to make one:
 
 - After a successful note or both run, open **Save this style for later** in Preview, type a name, then click **Save style**. This stores that run's style brief and measured word counts.
-- In step 2, open **Add a style summary**, type a name, paste a style summary, and optionally give a typical word count. Use the count when you know the length you want; the drafter treats it as the target. With no count, the drafter follows the length described in the summary and does not invent a median.
+- In step 2, open **Add a style summary**, type a name, paste a style summary, and optionally give a typical word count. Use the count when you know the length you want; the drafter treats it as the target. With no count, the drafter follows the length described in the summary and does not invent a median. A saved style with no count also gets no length retry, because there is no measured target to compare against.
 
 To use one, choose **Saved style** in step 2 and pick it from the list. You can view the summary before a run, or delete it after checking the confirmation box. Deleting removes only the saved copy on this computer. Saving a name that already exists replaces the old summary.
 
@@ -129,15 +129,15 @@ A finished run shows a compact line such as:
 2 model calls · 1,200 input tokens · 300 output tokens
 ```
 
-The app records input tokens, output tokens, and the model-call count from the API response for every paid call. That includes photo vision calls and retries.
+The app records input and output tokens from the API response and counts each call itself. That includes photo vision calls and retries. The model-call count still goes up when a response arrives without a usage object, so the number of calls is not understated.
 
 A dollar estimate appears only when both `INPUT_PRICE_PER_MTOK` and `OUTPUT_PRICE_PER_MTOK` are set in `.env`. Each is a price in US dollars per million tokens. The app does not hardcode prices. Without both, the line shows tokens only, and its help tooltip explains the two variables. The estimate is not a bill.
 
-The caption above Run shows "Up to N paid model calls" for the current mode, style source, and source files. It includes the retries that mode can make (the drafter length retry, the card retry, or both) and one vision call per photo page. It is a spending guard, not an estimate from the API. A run may make fewer calls.
+The caption above Run shows "Up to N paid model calls" for the current mode, style source, and source files. It includes the retries that mode can make (the drafter length retry, the card retry, or both) and one vision call per photo page. A saved style with no typical word count cannot make the length retry, so its maximum is one lower. It is a spending guard, not an estimate from the API. A run may make fewer calls.
 
 After an attempt that gets past the upload check, the Run button waits 60 seconds. That wait is there so a second click does not spend API credits again. A click with no files, or with neither box checked, does not start the wait. The cooldown stores epoch time, and for the last successful run it survives a browser reload.
 
-The last successful result is saved on this computer. A browser reload or a new tab restores it, with the caption "Restored from the last run on this computer. No credits were spent." Whatever the run made — note, cards, deck, or style brief — is kept, along with token counts and the finish time. A failed later run does not replace the stored result.
+The last successful result is saved on this computer. A browser reload or a new tab restores it, with the caption "Restored from the last run on this computer. No credits were spent." Whatever the run made — note, cards, deck, or style brief — is kept, along with measured counts, token counts, and the finish time. A failed later run does not replace the stored result.
 
 **Clear saved result** removes the local copy after you check the confirmation box. Files you already downloaded are not affected.
 
@@ -150,7 +150,9 @@ The app stores local data in `.note-split/`, next to the app. That folder is git
 
 Both files are written with `0o600` permissions, so only your operating-system user can read them. `NOTE_SPLIT_DATA_DIR` can point the app at a different folder.
 
-Source text and example notes are not stored. A saved style stores only its brief and measured summary. The last run stores the generated note and card content, the deck bytes, the style brief, token counts, and the finish time, when those pieces exist.
+The app sends each request with `store=False`, so the Responses API does not keep the response for later retrieval. OpenAI's own retention, abuse-monitoring, and account policies still apply to the request.
+
+Source text and example notes are not stored. A saved style stores only its brief and measured summary. The last run stores the generated note and card content, the deck bytes, the style brief, measured counts, token counts, and the finish time, when those pieces exist.
 
 ## Tips
 
@@ -158,16 +160,18 @@ Source text and example notes are not stored. A saved style stores only its brie
 - A saved style skips the summarizer and saves one paid call. It does not skip the drafter. Cards only ignores both example notes and saved styles.
 - Cards only never reads example markdown files or a saved style. They are not opened, and they are not sent.
 - Example notes decide the length and the habits of the new note. A few real notes of yours work better than one empty file. If you use a saved style with no measurements, add a typical word count when you create it, or expect the drafter to follow the length described in the summary.
-- Use a lecture, a chapter section, or a few paper pages. There is an 80,000 character cap. A full textbook will be refused.
+- Use a lecture, a chapter section, or a few paper pages. There is an 80,000 character cap on the combined source, and the same cap applies to the joined example notes. A full textbook will be refused.
 - One kind of source only. The page stops if photos are mixed with a txt or PDF, or if a PDF is mixed with a txt.
 - iPhone HEIC photos must be exported as JPEG first. HEIC is the photo format an iPhone saves by default, and the page accepts png, jpg, and jpeg.
 - At most 20 photos. Two or more source files can be dragged. Photos start in filename order, so page-10 comes before page-2 unless the names are zero-padded (page-01, page-02) or you drag them.
-- The optional instruction can change style and how many cards are made. It cannot make the app paste the source unchanged, and it cannot turn the whole note into cards. In a cards-only run, it cannot turn the whole source into cards.
+- The optional instruction can change style and how many cards are made. The prompts still forbid pasting the source unchanged and turning the whole note into cards, and the app does not check either afterward. In a cards-only run, the prompt also forbids turning the whole source into cards.
 - After a run that got past the upload check, the button waits 60 seconds. A click with no files does not start the wait. Neither box checked does not start the wait.
 - Several photos can take about a minute.
-- Math in the note uses `$` and `$$`. The deck download converts those to Anki's `\(\)` and `\[\]`.
+- Math in the note and in the card preview uses `$` and `$$`. Only the `.apkg` writer converts the card text to Anki's `\(\)` and `\[\]`; `note.md` and the on-page preview keep `$` and `$$`.
+- The deck writer also escapes `&`, `<`, and `>`, because Anki renders each field as HTML. Comparisons such as `x < y` stay literal instead of becoming tags or entities.
 - The conversion leaves common spaced dollar amounts alone, such as `$5 and $10` or `$3.50 to $4.25`. Tight inline math such as `$a$` still converts. A tight currency range such as `$5-$10` can still be mistaken for math. The app does not fully detect currency.
 - An empty card list can be a valid result. When the run makes cards, the `.apkg` is still created. A study note by itself does not make a package.
+- If a reply hits the model's output-token limit, the run stops with a message instead of returning a cut-off note or deck. Try a shorter source.
 - Handwritten math in photos can be wrong.
 - Typed PDFs only include text already stored in the file. If equations are missing, use photos of those pages instead.
 - `.txt` files and example `.md` files must be UTF-8. If one is not, the page shows a clear message instead of a traceback.
@@ -177,11 +181,12 @@ Source text and example notes are not stored. A saved style stores only its brie
 ## Project files
 
 - `app.py` — the web page: the checkboxes, the style source, the uploads, the Run button, the preview, the saved-style controls, the token line, and the saved-result restore and clear controls.
-- `models.py` — sends each request to OpenAI, asks for a JSON schema when a call needs one, returns the reply text, and counts tokens. It also estimates a cost when both price variables are set.
+- `models.py` — sends each request to OpenAI, asks for a JSON schema when a call needs one, returns the reply text, asks the provider not to store responses, and counts tokens. It also estimates a cost when both price variables are set.
 - `prompts.py` — holds the instruction text for the summarizer, the drafter, the card-creator, a separate cards-only instruction, and photo transcription.
 - `extract.py` — reads `.txt` files, PDFs, and photos, and turns them into one source string. It also handles photo transcription.
-- `pipeline.py` — runs the model calls for the chosen mode, reuses a saved style instead of calling the summarizer, checks the replies, parses the card JSON, and swaps math delimiters on a copy for the deck.
-- `anki_export.py` — turns the card list into the `.apkg` file.
+- `pipeline.py` — runs the model calls for the chosen mode, reuses a saved style instead of calling the summarizer, checks the replies, parses the card JSON, and swaps math delimiters on a copy of the cards for the deck. Line breaks inside display math become spaces.
+- `anki_export.py` — escapes each field for HTML and turns the card list into the `.apkg` file.
 - `storage.py` — saves and loads style profiles and the last run in `.note-split/`.
+- `.streamlit/config.toml` — the paper-and-ink light and dark theme, fonts, and spacing.
 - `.env.example` — a sample settings file with `PROVIDER=openai`, a blank `API_KEY`, and optional price variables.
 - `requirements.txt` — the list of packages to install, pinned to exact versions.

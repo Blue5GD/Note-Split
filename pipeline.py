@@ -70,7 +70,12 @@ def _display_math(match: re.Match[str]) -> str:
     # Return the two characters \ and [, then the math, then \ and ].
     # re.sub inserts this text as-is. A replacement string would treat
     # \1 as "the captured math", so writing \[ by hand there is easy to get wrong.
-    return "\\[" + match.group(1) + "\\]"
+    # A newline is legal TeX whitespace, but Anki renders the field as
+    # HTML and a blank line inside display math can become \par, which
+    # math mode rejects. Collapsing line breaks to spaces keeps the math
+    # on one logical line without changing its meaning.
+    math = match.group(1).replace("\r\n", "\n").replace("\r", "\n")
+    return "\\[" + math.replace("\n", " ") + "\\]"
 
 
 def _inline_math(match: re.Match[str]) -> str:
@@ -82,8 +87,10 @@ def swap_math_delimiters(text: str) -> str:
     """Turn $...$ and $$...$$ into Anki MathJax delimiters.
 
     Display math is first, left to right, and it may span lines.
-    Inline math is second. An inline span stays on one line, so
-    $a$ and $b$ becomes two spans. A string that already uses
+    Line breaks inside a display block become spaces, because Anki
+    renders the field as HTML and a blank line in math mode is not
+    valid TeX. Inline math is second. An inline span stays on one line,
+    so $a$ and $b$ becomes two spans. A string that already uses
     \\(...\\) and \\[...\\] is unchanged, because these passes only
     look for $ signs. A single leftover $ stays. The input string
     itself is not edited; the swapped text is a new string.

@@ -1,11 +1,12 @@
 """Turn swapped cards into an Anki package.
 
 The caller already swapped $...$ into Anki's \\(...\\) and \\[...\\].
-This file writes those strings into a .apkg and returns the bytes.
-It does not change the card text. Writing the package does not
-require Anki to be installed.
+This file escapes each field for HTML, then writes it into a .apkg and
+returns the bytes. It does not change the math delimiters. Writing the
+package does not require Anki to be installed.
 """
 
+import html
 import os
 import tempfile
 
@@ -22,8 +23,9 @@ DECK_NAME = "Study cards"
 # Our own model. Do not use genanki's built-in basic model.
 # Two fields, one template: the front is the question, the back is the answer.
 # white-space: pre-wrap is on the template so a newline in a field stays
-# a newline. Anki treats the field as HTML, and a raw newline otherwise
-# collapses. A < or an & in the field is left as that character.
+# a newline. Anki treats the field as HTML, so export_apkg escapes &, <,
+# and > before writing. Text such as "x < 5" then stays literal instead
+# of starting a tag or an entity.
 _MODEL = genanki.Model(
     MODEL_ID,
     "Study card",
@@ -48,9 +50,12 @@ _MODEL = genanki.Model(
 def export_apkg(cards: list[dict[str, str]]) -> bytes:
     """Write cards to an .apkg and return the file bytes.
 
-    cards is a list of {"front": ..., "back": ...}. The strings are
-    stored as given. This does not escape HTML, and it does not change
-    any other character. An empty list still returns a package.
+    cards is a list of {"front": ..., "back": ...}. Each string is
+    escaped for HTML: &, <, and > become entities. Quotes, backslashes,
+    dollar signs, and every other character stay as they are. Anki
+    renders a field as HTML, so this keeps comparisons and ampersands
+    in math or text literal instead of turning them into tags. An empty
+    list still returns a package.
 
     The file is written in a temporary directory and deleted before
     this returns, so the project folder does not keep an .apkg.
@@ -59,10 +64,13 @@ def export_apkg(cards: list[dict[str, str]]) -> bytes:
     deck.add_model(_MODEL)
     for card in cards:
         # A new list, so this does not edit the caller's dict.
-        # The strings themselves are stored unchanged.
+        # Only the escaped copies go into the package.
         note = genanki.Note(
             model=_MODEL,
-            fields=[card["front"], card["back"]],
+            fields=[
+                html.escape(card["front"], quote=False),
+                html.escape(card["back"], quote=False),
+            ],
         )
         deck.add_note(note)
 
