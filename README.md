@@ -70,12 +70,13 @@ The file should look like this, with your key after the equals sign:
 PROVIDER=openai
 API_KEY=sk-your-key-here
 
-# Optional: prices in USD per million tokens. Set both or neither.
-INPUT_PRICE_PER_MTOK=
-OUTPUT_PRICE_PER_MTOK=
+# Optional: prices in USD per million tokens. Uncomment both to show
+# an estimated dollar cost. Set both or neither.
+# INPUT_PRICE_PER_MTOK=
+# OUTPUT_PRICE_PER_MTOK=
 ```
 
-The two price lines are optional. Each is a price in US dollars per million tokens. Set both to show an estimated dollar cost for a finished run. Leave both blank, or comment them out, to show token counts only. The app does not hardcode prices. The estimate is not a bill.
+The two price lines are optional. Each is a price in US dollars per million tokens. Uncomment both and set both to show an estimated dollar cost for a finished run. Leave them commented out, or blank, to show token counts only. The app does not hardcode prices. The estimate is not a bill.
 
 The real key stays on your computer. Pushing sends files to the shared copy of the project, so `.env` must not be pushed. `.env.example` is the file that is safe to share, because its key line is empty.
 
