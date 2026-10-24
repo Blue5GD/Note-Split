@@ -9,7 +9,7 @@ come back joined into one string.
 
 import pymupdf
 
-from models import Stop, call_model
+from models import Stop, TokenUsage, call_model
 from prompts import VISION_PROMPT
 
 # About a long lecture. Later, the example-note check uses this same cap.
@@ -82,8 +82,18 @@ def _is_pdf(filename: str) -> bool:
 
 
 def _read_txt(data: bytes) -> str:
+    """Return the text of one .txt file.
+
+    The file must be UTF-8. Another encoding raises Stop with a message
+    that says how to save it again.
+    """
     # A .txt file is already text. Read the bytes as UTF-8 and return them.
-    return data.decode("utf-8")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Stop(
+            "The file is not UTF-8 text. Save it as UTF-8 and upload it again."
+        ) from exc
 
 
 def _read_pdf(data: bytes) -> str:
@@ -100,11 +110,17 @@ def _read_pdf(data: bytes) -> str:
         document.close()
 
 
-def extract_photos(photos: list[tuple[str, bytes]]) -> str:
+def extract_photos(
+    photos: list[tuple[str, bytes]],
+    usage: TokenUsage | None = None,
+) -> str:
     """Turn photo pages into one string.
 
     photos is a list of (filename, file_bytes) pairs. One pair is one
     page. The caller chooses the order. This function does not sort.
+
+    usage, when given, collects the token counts from every vision
+    call, including a call whose page later turns out to be blank.
 
     More than MAX_PHOTOS raises Stop before any vision call. Each page
     is one call. A blank page names that file and stops. Pages are
@@ -122,6 +138,7 @@ def extract_photos(photos: list[tuple[str, bytes]]) -> str:
         reply = call_model(
             VISION_PROMPT,
             [{"data": data, "media_type": _media_type(filename)}],
+            usage=usage,
         )
         # The model was told not to use a fence. If it wraps the whole
         # page in one anyway, drop that fence, then check for a blank page.
