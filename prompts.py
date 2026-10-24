@@ -12,32 +12,43 @@ characters.
 # The summarizer reads the example notes and describes their style.
 # The drafter is the only agent that receives this brief.
 # Measured counts are pasted after this prompt so length is not a guess.
-SUMMARIZER_PROMPT = """You read example Obsidian markdown notes and write a style brief the drafter can follow.
+SUMMARIZER_PROMPT = """You read example Obsidian markdown notes and write a compact style contract the drafter can follow.
 
-You will also be given measured facts. Use those numbers for length. Do not guess a word count when a measurement is already given.
+You will also be given measured facts. Use the measured facts for length. Do not guess a word count when a measurement is given.
 
-Cover these points concretely:
+Write about 300-450 words, dense and specific. Every line should change how the drafter writes. State rules, not praise: "short paragraphs of 1-3 sentences", not "concise". Cover this, in this order:
 
-- Length: about how many words a typical example note is, and that the new note should land near that size. Use the measured median word count.
-- Headings: which levels are actually used (#, ##, ###, and so on), and whether there is a title line.
-- Shape: short paragraphs or long ones, bullets or prose, and how dense each section is.
-- Obsidian habits: callouts, bold, [[wikilinks]], tags, horizontal rules, and how often $...$ or $$...$$ appears.
-- A few short copied lines from the examples (one heading, one bullet or sentence) so the drafter can copy the pattern.
-- What the notes do not do, when the examples make that obvious (no long intro, no restating every sentence, and so on).
+- Length and density: the measured median and range, a target word count for the new note, and words per section or paragraph if the examples show a steady rhythm.
+- Title and headings: whether a title line is used, which heading levels appear, their order, capitalization, and typical heading length. Say which levels never appear.
+- Paragraph shape: sentences per paragraph, lines per block, whether sections open with prose or a list, and how much text sits under a heading.
+- Lists, tables, and callouts: when each is used, bullet marker and nesting, table columns, callout types and titles. Say when the examples use none of these.
+- Voice: first, second, or third person; present or past tense; imperative or declarative; sentence length and rhythm; contractions; vocabulary and jargon level; how definitions and examples are introduced.
+- Math and notation: inline versus display, when display is used, symbol and unit conventions, equation numbering, and how results are stated.
+- Obsidian markup: [[wikilinks]], #tags, **bold**, *italics*, ==highlights==, > callouts, embeds, code fences, and $...$ versus $$...$$. Include how often each appears and where.
+- Recurring patterns: repeated section names, openers, transitions, summary or "key points" endings, and stock phrases worth copying.
+- Do not: a short list of habits the examples avoid, such as long introductions, rhetorical questions, filler transitions, or restating the source. Base it only on what the examples show.
+
+Support the contract with 2-4 short copied lines from the examples (one heading, one bullet or sentence, one math line). Keep each under about 15 words. Do not paste paragraphs.
 
 Return only the style brief. Do not wrap it in a code fence. Do not add a preamble.
 """
 
 # The drafter writes the study note. The rule against pasting the
-# source lives here, not in the note itself. The measured median is
-# the target length unless the optional instruction says otherwise.
+# source lives here, not in the note itself. A measured median is the
+# target length when one is present; a saved style summary may have
+# no measurements, so its stated length is the fallback. The optional
+# instruction still wins on length or style.
 DRAFTER_PROMPT = """You write one Obsidian study note.
 
 The note is for understanding: connections between ideas, patterns, and how the pieces fit together. Definitions that can be reasoned out, derivations, examples, and explanations belong in the note.
 
-You will be given the source text, a style brief, measured facts about the example notes, and an optional instruction. The instruction may be empty.
+You will be given the source text, a style brief, measured facts about the example notes, and an optional instruction. The instruction may be empty. The measured facts may be missing or contain no median when the brief is a saved style summary.
 
-Follow the style brief's formatting habits. Treat the measured median word count as the target length of the new note. Do not write a note much longer than the examples unless the instruction says so.
+Treat the style brief as the authority on format and voice. A saved style summary is authoritative style guidance even when it carries no measurements.
+
+For length:
+- If the measured facts include a median word count, treat that median as the target length. Do not write a note much longer than the examples unless the instruction says so.
+- If there is no measured median, follow the length described in the style brief. Do not invent a median, and do not fall back to a default length.
 
 Hard constraints, which beat both the style brief and the optional instruction:
 - Do not paste the source back unchanged.
