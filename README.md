@@ -137,7 +137,7 @@ The caption above Run shows "Up to N paid model calls" for the current mode, sty
 
 After an attempt that gets past the upload check, the Run button waits 60 seconds. That wait is there so a second click does not spend API credits again. A click with no files, or with neither box checked, does not start the wait. The cooldown stores epoch time, and for the last successful run it survives a browser reload.
 
-The last successful result is saved on this computer. A browser reload or a new tab restores it, with the caption "Restored from the last run on this computer. No credits were spent." The note, cards, deck, style brief, token counts, and finish time are kept. A failed later run does not replace the stored result.
+The last successful result is saved on this computer. A browser reload or a new tab restores it, with the caption "Restored from the last run on this computer. No credits were spent." Whatever the run made — note, cards, deck, or style brief — is kept, along with token counts and the finish time. A failed later run does not replace the stored result.
 
 **Clear saved result** removes the local copy after you check the confirmation box. Files you already downloaded are not affected.
 
@@ -150,7 +150,7 @@ The app stores local data in `.note-split/`, next to the app. That folder is git
 
 Both files are written with `0o600` permissions, so only your operating-system user can read them. `NOTE_SPLIT_DATA_DIR` can point the app at a different folder.
 
-Source text and example notes are not stored. A saved style stores only its brief and measured summary. The last run stores the generated note and card content, the deck bytes, the style brief, token counts, and the finish time.
+Source text and example notes are not stored. A saved style stores only its brief and measured summary. The last run stores the generated note and card content, the deck bytes, the style brief, token counts, and the finish time, when those pieces exist.
 
 ## Tips
 
