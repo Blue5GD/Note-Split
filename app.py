@@ -6,17 +6,26 @@ click. A later click, such as a download, an expander, or a checkbox,
 reruns this script from the top and does not start the pipeline again.
 
 Two boxes choose a study note, flashcards, or both. Cards only does
-not read the example notes. A click with neither box checked is a
-local stop, like a missing file, and does not start a wait. Once a
-click gets past that check, the finish time is kept for this browser
-tab. Another click is refused for 60 seconds after the attempt ends.
-The note under the button counts those seconds down on its own.
+not read example notes or a saved style. A note run takes its style
+from uploaded example notes or a saved style. A saved style skips the
+summarizer, so one paid call is saved. A click with neither box checked
+is a local stop, like a missing file, and does not start a wait. Once a
+click gets past that check, the finish time is kept as epoch seconds in
+this browser tab and in the saved run. Another click is refused for 60
+seconds after the attempt ends. A restored run keeps that guard across
+a reload. The note under the button counts those seconds down on its
+own.
 
 The stored result is written only after run_pipeline returns. A notes
 run has no card package. A failed later run does not replace the
-stored dict. When a note was written, that dict includes the style
-brief. The Style notes expander draws that brief. It is not a
-download.
+stored dict. The result also holds the token counts and the epoch
+finish time. When a note was written, it includes the style brief.
+The Style notes expander draws that brief. It is not a download.
+
+The last finished run is saved on this computer. A reload restores it,
+marked as restored, so the note and cards are shown without credits
+being spent. Saved styles live there too, so a brief that was already
+paid for can be used again.
 
 Two or more txt files, PDFs, or photos can be dragged into the order
 they should be read. Streamlit reruns this file on every widget
@@ -37,8 +46,24 @@ except ImportError:
     sort_items = None
 
 from extract import extract_photos, extract_sources
-from models import ProviderError, Stop
+from models import (
+    ProviderError,
+    Stop,
+    TokenUsage,
+    estimate_cost,
+    format_cost,
+)
 from pipeline import check_example_notes, join_example_notes, run_pipeline
+from storage import (
+    StyleProfile,
+    clear_last_run,
+    delete_profile,
+    get_profile,
+    list_profiles,
+    load_last_run,
+    save_last_run,
+    save_profile,
+)
 
 # This stop is only for a source file plus photos. Several .txt files,
 # or several PDFs, are one kind and are allowed. A .txt mixed with a
@@ -50,10 +75,21 @@ ONE_KIND = "Upload one kind of source: .txt files, PDFs, or photos."
 SOURCE_ORDER_KEY = "source_order"
 PHOTO_ORDER_KEY = "photo_order"
 
+# The two style choices. The saved path reuses a brief instead of
+# paying the summarizer to write a new one.
+UPLOAD_STYLE = "Upload example notes"
+SAVED_STYLE = "Saved style"
+STYLE_NOTICE_KEY = "style_notice"
+
+# True only while Preview is showing the run restored from disk. A new
+# successful run clears it.
+RESTORED_KEY = "result_restored"
+
 # How long a finished attempt blocks the next one. The clock starts
 # when the attempt ends, not when the button is clicked.
 COOLDOWN_SECONDS = 60
-# session_state key for that finish time. A missing key means no wait.
+# session_state key for that finish time. It is epoch seconds, because
+# the same number is saved with the last run. A missing key means no wait.
 RUN_FINISHED_KEY = "run_finished_at"
 
 
@@ -62,11 +98,13 @@ def _seconds_left() -> int:
 
     No stored finish time means 0. A finish time that is already a
     minute old is removed, so a missing key again means the wait is over.
+    The stored time is time.time(), matching the saved run, so a reload
+    can keep the same wait.
     """
     finished = st.session_state.get(RUN_FINISHED_KEY)
     if finished is None:
         return 0
-    remaining = COOLDOWN_SECONDS - (time.monotonic() - finished)
+    remaining = COOLDOWN_SECONDS - (time.time() - finished)
     if remaining <= 0:
         del st.session_state[RUN_FINISHED_KEY]
         return 0
@@ -74,22 +112,64 @@ def _seconds_left() -> int:
     return math.ceil(remaining)
 
 
-def _reject_bad_upload(examples, sources, photos, mode) -> None:
+def _restore_last_run() -> None:
+    """Restore the saved run once, and keep its wait when it is fresh.
+
+    A reload starts with an empty st.session_state. The restored dict
+    is marked, so Preview can say that opening the page did not spend
+    credits. When its epoch finish time is still inside the cooldown,
+    the same time seeds the wait key, so an immediate click cannot
+    start a second paid run.
+    """
+    if "result" in st.session_state:
+        return
+    restored = load_last_run()
+    if restored is None:
+        return
+    st.session_state["result"] = restored
+    st.session_state[RESTORED_KEY] = True
+
+    finished = restored.get("finished_at_epoch")
+    if isinstance(finished, bool) or not isinstance(finished, (int, float)):
+        return
+    remaining = COOLDOWN_SECONDS - (time.time() - float(finished))
+    if 0 < remaining <= COOLDOWN_SECONDS:
+        st.session_state[RUN_FINISHED_KEY] = float(finished)
+
+
+def _reject_bad_upload(
+    examples,
+    sources,
+    photos,
+    mode,
+    style_choice,
+    selected_profile,
+) -> None:
     """Stop if Run was clicked without a usable choice or upload.
 
     This runs before example notes are read and before the source is
     read. It looks at which kinds of files were chosen, not at their
     bytes. Several .txt files are fine. Several PDFs are fine.
 
-    A notes run, or a run that makes both, still needs at least one
-    example note. A cards run does not: it only reads the source.
-    Neither box checked is the same kind of stop as a missing file.
-    It is raised here, outside the wait.
+    A notes run, or a run that makes both, still needs a style source.
+    The upload path needs at least one example note. The saved path
+    needs a real selected profile, with a non-blank brief. Cards only
+    ignores the style choice entirely. Neither box checked is the same
+    kind of stop as a missing file. It is raised here, outside the wait.
     """
     if mode not in ("both", "notes", "cards"):
         raise Stop("Choose a study note, flashcards, or both.")
-    if mode != "cards" and not examples:
-        raise Stop("Upload at least one example note.")
+    if mode != "cards":
+        if style_choice == SAVED_STYLE:
+            if selected_profile is None or selected_profile.brief.strip() == "":
+                raise Stop(
+                    'Choose a saved style, or add one under "Add a style summary".'
+                )
+        elif style_choice == UPLOAD_STYLE:
+            if not examples:
+                raise Stop("Upload at least one example note.")
+        else:
+            raise Stop("Choose where the note's style should come from.")
     if not sources and not photos:
         raise Stop(
             "Upload a source: one or more .txt files, one or more PDFs, or photos."
@@ -110,7 +190,13 @@ def _example_text(examples) -> tuple[list[str], str]:
     """
     notes = []
     for example in examples:
-        notes.append(example.getvalue().decode("utf-8"))
+        try:
+            notes.append(example.getvalue().decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise Stop(
+                f"The example note {example.name} is not UTF-8 text. "
+                "Save it as UTF-8 and upload it again."
+            ) from exc
     return notes, join_example_notes(notes)
 
 
@@ -127,19 +213,21 @@ def _mixes_pdf_and_txt(sources) -> bool:
     return pdf_count > 0 and pdf_count < len(sources)
 
 
-def _source_text(sources, photos) -> str:
+def _source_text(sources, photos, usage=None) -> str:
     """Read the source files and return one string.
 
-    Call this only after check_example_notes has returned. Photos go
-    in as (filename, bytes) pairs. Every txt or PDF goes in the same
-    way. Both lists already follow the order chosen above the Run
-    button. This function does not sort.
+    Call this only after check_example_notes has returned, or on a
+    saved-style run that skips that check. Photos go in as
+    (filename, bytes) pairs, and usage collects one vision call per
+    page. Every txt or PDF goes in the same way. Both lists already
+    follow the order chosen above the Run button. This function does
+    not sort.
     """
     if photos:
         pairs = []
         for photo in photos:
             pairs.append((photo.name, photo.getvalue()))
-        return extract_photos(pairs)
+        return extract_photos(pairs, usage=usage)
     # getvalue() returns the whole file on every Run. read() would leave
     # the pointer at the end, so a second Run could see an empty file.
     pairs = []
@@ -369,6 +457,240 @@ def _preview_caption(mode: str, note, apkg_bytes, brief) -> str:
     return line
 
 
+def _saved_style_panel() -> StyleProfile | None:
+    """Draw the saved style controls and return the chosen profile.
+
+    This is called only when the radio chose "Saved style". No profiles
+    means None, and the run check stops before the source is read. The
+    add form is always here, so the first profile can be made without
+    a paid call. Delete needs a checked confirmation and then a click.
+    """
+    st.caption(
+        "Reuse a style summary that is already saved. The summarizer is skipped."
+    )
+    profiles = list_profiles()
+    selected = None
+    if profiles:
+        names = [profile.name for profile in profiles]
+        chosen = st.selectbox("Saved style", names)
+        selected = get_profile(chosen) if chosen is not None else None
+        if selected is not None:
+            with st.expander(
+                "View style summary",
+                expanded=False,
+                icon=":material/ink_pen:",
+            ):
+                st.markdown(selected.brief)
+                st.caption(
+                    "The summarizer is skipped when this style is used, so "
+                    "one paid model call is saved."
+                )
+            with st.popover("Delete style", icon=":material/delete:"):
+                st.caption(f'Delete "{selected.name}" from this computer?')
+                confirmed = st.checkbox(
+                    "Confirm delete",
+                    key=(
+                        f"confirm_delete_style:"
+                        f"{selected.name}:{selected.saved_at}"
+                    ),
+                )
+                if st.button(
+                    "Delete style",
+                    icon=":material/delete:",
+                    disabled=not confirmed,
+                    key=f"delete_style:{selected.name}:{selected.saved_at}",
+                ):
+                    try:
+                        removed = delete_profile(selected.name)
+                    except OSError as error:
+                        st.error(f"Could not delete the style: {error}")
+                    else:
+                        if removed:
+                            st.session_state[STYLE_NOTICE_KEY] = (
+                                f'Deleted the style "{selected.name}".'
+                            )
+                            st.rerun()
+                        else:
+                            st.error("That style was already removed.")
+    else:
+        st.info(
+            "No saved styles yet. Add a summary below, then choose it here."
+        )
+
+    with st.expander(
+        "Add a style summary",
+        expanded=False,
+        icon=":material/add:",
+    ):
+        with st.form("add_style_profile"):
+            name = st.text_input(
+                "Name",
+                placeholder="For example: Biology lecture notes",
+                key="new_style_name",
+            )
+            brief = st.text_area(
+                "Style summary",
+                height=160,
+                placeholder=(
+                    "Describe length, headings, math habits, and what the "
+                    "notes avoid."
+                ),
+                key="new_style_brief",
+            )
+            words = st.number_input(
+                "Typical words per note",
+                min_value=0,
+                step=50,
+                value=0,
+                help=(
+                    "Optional. Used as both the median and the longest "
+                    "target length."
+                ),
+                key="new_style_words",
+            )
+            submitted = st.form_submit_button(
+                "Save style",
+                icon=":material/save:",
+            )
+            if submitted:
+                try:
+                    target = (
+                        int(words) if words is not None and words > 0 else 0
+                    )
+                    saved = save_profile(
+                        name,
+                        brief,
+                        median_words=float(target),
+                        longest_words=target,
+                    )
+                except (ValueError, OSError) as error:
+                    st.error(f"Could not save the style: {error}")
+                else:
+                    st.session_state[STYLE_NOTICE_KEY] = (
+                        f'Saved the style "{saved.name}".'
+                    )
+                    st.rerun()
+    return selected
+
+
+def _style_measured(measured) -> tuple[str, float, int]:
+    """The profile fields from a pipeline measured dict.
+
+    An older saved run may have no measured dict, or a hand-edited one
+    may have the wrong types. A missing or bad value becomes the same
+    empty value the profile store uses.
+    """
+    if not isinstance(measured, dict):
+        return "", 0.0, 0
+    text = measured.get("text")
+    if not isinstance(text, str):
+        text = ""
+    median_words = measured.get("median_words")
+    if isinstance(median_words, bool) or not isinstance(
+        median_words, (int, float)
+    ):
+        median_words = 0.0
+    longest_words = measured.get("longest_words")
+    if isinstance(longest_words, bool) or not isinstance(
+        longest_words, (int, float)
+    ):
+        longest_words = 0
+    return text, float(median_words), int(longest_words)
+
+
+def _show_usage(usage_data) -> None:
+    """Draw the compact token and cost line for a finished run.
+
+    An older saved result has no usage key, so that line is left out.
+    A malformed dict is left out too. The dollar estimate appears only
+    when both price variables are set, because estimate_cost returns
+    None otherwise. The help text says how to turn it on.
+    """
+    if not isinstance(usage_data, dict):
+        return
+    try:
+        usage = TokenUsage.from_dict(usage_data)
+    except (TypeError, ValueError, OverflowError):
+        return
+    if usage.calls <= 0:
+        return
+    call_word = "call" if usage.calls == 1 else "calls"
+    line = (
+        f"{usage.calls} model {call_word} · "
+        f"{usage.input_tokens:,} input tokens · "
+        f"{usage.output_tokens:,} output tokens"
+    )
+    cost_text = format_cost(estimate_cost(usage))
+    help_text = None
+    if cost_text == "":
+        help_text = (
+            "Add INPUT_PRICE_PER_MTOK and OUTPUT_PRICE_PER_MTOK to .env "
+            "to show an estimated dollar cost."
+        )
+    else:
+        line += f" · est. {cost_text}"
+    st.caption(":material/payments: " + line, help=help_text)
+
+
+def _max_paid_calls(mode, style_choice, photo_count: int) -> int:
+    """The most paid calls the current mode, style, and source can make.
+
+    The counts include the one card retry and the one drafter length
+    retry. A saved style skips the summarizer, so its count is one
+    lower. Each photo page is one vision call. No model call is made to
+    work this out.
+    """
+    if mode == "cards":
+        base = 2
+    elif mode == "notes":
+        base = 2 if style_choice == SAVED_STYLE else 3
+    elif mode == "both":
+        base = 4 if style_choice == SAVED_STYLE else 5
+    else:
+        return 0
+    return base + photo_count
+
+
+def _max_calls_help(mode, style_choice, photo_count: int) -> str:
+    """The breakdown behind the maximum call caption."""
+    if mode == "cards":
+        text = "Cards only: one card call and one retry."
+    elif mode == "notes":
+        if style_choice == SAVED_STYLE:
+            text = (
+                "Saved style: one drafter call and one length retry. "
+                "The summarizer is skipped."
+            )
+        else:
+            text = (
+                "Example notes: one summarizer call, one drafter call, "
+                "and one length retry."
+            )
+    elif mode == "both":
+        if style_choice == SAVED_STYLE:
+            text = (
+                "Saved style: one drafter call, one length retry, one "
+                "card call, and one card retry. The summarizer is skipped."
+            )
+        else:
+            text = (
+                "Example notes: one summarizer call, one drafter call, "
+                "one length retry, one card call, and one card retry."
+            )
+    else:
+        return "No mode is selected, so Run stops before any model call."
+
+    if photo_count == 1:
+        text += " 1 photo page adds one vision call."
+    elif photo_count > 1:
+        text += (
+            f" {photo_count} photo pages add one vision call each."
+        )
+    else:
+        text += " No photo pages, so no vision calls."
+    return text
+
+
 # set_page_config has to be the first Streamlit call. "centered" keeps
 # the form at a reading width. A wide layout is for dashboards.
 st.set_page_config(
@@ -377,6 +699,10 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed",
 )
+
+# A browser reload forgets session_state. Restore the last result before
+# any widget is drawn, so Preview and the wait key both see it.
+_restore_last_run()
 
 # Redraws only the wait note, once a second. run_every=1 means one
 # second. The uploaders, the button, and the pipeline stay outside
@@ -406,10 +732,10 @@ def _show_cooldown() -> None:
 # and does not call the model. That call stays inside the button.
 st.title("Note Split", icon=":material/menu_book:")
 st.markdown(
-    "Upload notes you already like, plus one lecture or a set of paper pages. "
-    "The study note is for understanding, and the cards are only the facts "
-    "you need word for word. You can make a study note, flashcards, or both, "
-    "and cards only uses the source, not the example notes."
+    "Upload example notes or pick a saved style, plus one lecture or a set "
+    "of paper pages. The study note is for understanding, and the cards are "
+    "only the facts you need word for word. You can make a study note, "
+    "flashcards, or both, and cards only uses the source."
 )
 
 # These two boxes only pick the mode. A narrow window stacks the
@@ -428,8 +754,8 @@ with st.container(border=True):
             key="make_note",
         )
         st.caption(
-            "The study note uses the example Obsidian files to copy their length and habits. "
-            "Unchecking it skips that work."
+            "The study note copies the length and habits of example notes "
+            "or a saved style. Unchecking it skips that work."
         )
     with card_col:
         make_cards = st.checkbox(
@@ -439,31 +765,49 @@ with st.container(border=True):
         )
         st.caption(
             "Flashcards are only the word-for-word facts. "
-            "Cards only does not read the example Obsidian files. It only reads the source."
+            "Cards only does not read example notes or saved styles. "
+            "It only reads the source."
         )
 
 with st.container(border=True):
-    st.subheader("2. Example notes", icon=":material/description:")
-    # Cards only must not create the uploader. A later read of that
-    # widget would open the files. examples is an empty list instead,
-    # so the click below has nothing to decode.
+    st.subheader("2. Style source", icon=":material/palette:")
+    # Cards only must not create the uploader or read a profile. A later
+    # read of that widget would open the files. examples is an empty list
+    # instead, so the click below has nothing to decode.
     if make_cards and not make_note:
         examples = []
+        style_choice = None
+        selected_profile = None
         with st.container(border=True):
             st.markdown(
-                "This run only reads the source. Example Obsidian markdown files "
-                "are not opened and are not sent to the model."
+                "This run only reads the source. Example notes and saved "
+                "styles are not used and are not sent to the model."
             )
     else:
-        st.caption(
-            "One or more Obsidian markdown files. These set the length and the habits of the new note."
+        notice = st.session_state.pop(STYLE_NOTICE_KEY, None)
+        if notice:
+            st.caption(":material/check_circle: " + notice)
+        style_choice = st.radio(
+            "Choose a style source",
+            [UPLOAD_STYLE, SAVED_STYLE],
+            horizontal=True,
+            key="style_choice",
         )
-        examples = st.file_uploader(
-            "Example markdown notes",
-            type=["md"],
-            accept_multiple_files=True,
-            help="At least one .md file.",
-        )
+        if style_choice == SAVED_STYLE:
+            examples = []
+            selected_profile = _saved_style_panel()
+        else:
+            selected_profile = None
+            st.caption(
+                "One or more Obsidian markdown files. These set the length "
+                "and the habits of the new note."
+            )
+            examples = st.file_uploader(
+                "Example markdown notes",
+                type=["md"],
+                accept_multiple_files=True,
+                help="At least one .md file.",
+            )
 
 with st.container(border=True):
     st.subheader("3. Source", icon=":material/upload_file:")
@@ -506,7 +850,8 @@ with st.container(border=True):
 with st.container(border=True):
     st.subheader("4. Instruction", icon=":material/edit_note:")
     st.caption(
-        "Optional. Empty is fine. Use this when the new note should differ from the examples."
+        "Optional. Empty is fine. Use this when the new note should differ "
+        "from the style source."
     )
     instruction = st.text_area(
         "Optional instruction",
@@ -539,6 +884,20 @@ else:
     button_icon = ":material/auto_stories:"
     spinner_text = "Writing the note and the cards. Several photos can take about a minute."
 
+# The caption above the button is a spend guard, not an estimate from
+# the API. Each photo page is one vision call. The counts include the
+# card retry and the drafter length retry, so they are maximums.
+if run_mode is not None:
+    max_calls = _max_paid_calls(
+        run_mode,
+        style_choice,
+        len(photos_to_read),
+    )
+    st.caption(
+        f":material/payments: Up to {max_calls} paid model calls for this run.",
+        help=_max_calls_help(run_mode, style_choice, len(photos_to_read)),
+    )
+
 # The button stays clickable during the wait. A disabled button does
 # not rerun the page by itself, so the wait would never end. The click
 # is refused in code while seconds are left.
@@ -552,13 +911,23 @@ if st.button(
     # The note under the button says how many seconds are left.
     if _seconds_left() == 0:
         try:
-            _reject_bad_upload(examples, sources, photos, run_mode)
+            _reject_bad_upload(
+                examples,
+                sources,
+                photos,
+                run_mode,
+                style_choice,
+                selected_profile,
+            )
             # Past the upload check, this attempt may call the model.
             # finally records the finish time on every way out, so the
             # wait does not depend on a crash. A missing file, or neither
             # box checked, never reaches this try, so it does not start
             # the wait.
             try:
+                # One collector per run. Photo pages add their vision
+                # calls, and the pipeline adds one entry per model call.
+                usage = TokenUsage()
                 with st.spinner(spinner_text):
                     if run_mode == "cards":
                         # Skip _example_text on this branch. A normal read
@@ -567,39 +936,96 @@ if st.button(
                         # and it must not call check_example_notes. The
                         # empty string and None are placeholders. The
                         # pipeline does not read example notes in this mode.
-                        source = _source_text(sources_to_read, photos_to_read)
-                        st.session_state["result"] = run_pipeline(
-                            "", source, instruction, None, mode="cards"
+                        source = _source_text(
+                            sources_to_read,
+                            photos_to_read,
+                            usage=usage,
+                        )
+                        result = run_pipeline(
+                            "",
+                            source,
+                            instruction,
+                            None,
+                            mode="cards",
+                            usage=usage,
+                        )
+                    elif style_choice == SAVED_STYLE:
+                        # A saved profile already has its brief and its
+                        # measurements. Do not read the example uploads,
+                        # and do not call check_example_notes. The saved
+                        # style replaces the summarizer, so no paid call
+                        # is spent writing a new brief.
+                        source = _source_text(
+                            sources_to_read,
+                            photos_to_read,
+                            usage=usage,
+                        )
+                        result = run_pipeline(
+                            "",
+                            source,
+                            instruction,
+                            None,
+                            mode=run_mode,
+                            usage=usage,
+                            style_brief=selected_profile.brief,
+                            style_measured_text=selected_profile.measured_text,
+                            style_median_words=selected_profile.median_words,
+                            style_longest_words=selected_profile.longest_words,
                         )
                     else:
                         example_files, example_notes = _example_text(examples)
                         # Before the source is read, and before any photo is sent.
                         check_example_notes(example_notes)
                         # The lists above are already in the dragged order.
-                        source = _source_text(sources_to_read, photos_to_read)
+                        source = _source_text(
+                            sources_to_read,
+                            photos_to_read,
+                            usage=usage,
+                        )
                         # run_pipeline returns when the note is done. A both
-                        # run also waits for the .apkg bytes. Assigning that
-                        # dict here is the first time a result is stored.
+                        # run also waits for the .apkg bytes. This local
+                        # dict is the first time a result is stored.
                         # example_files is each upload, measured before the notes are joined.
                         # run_mode is "notes" or "both" in this branch.
-                        st.session_state["result"] = run_pipeline(
+                        result = run_pipeline(
                             example_notes,
                             source,
                             instruction,
                             example_files,
                             mode=run_mode,
+                            usage=usage,
+                        )
+
+                    # The run succeeded. Replacing the stored result only
+                    # here keeps a failed later run from clearing Preview.
+                    result["usage"] = usage.as_dict()
+                    # Epoch seconds, so a reload can restore this exact
+                    # wait along with the result. Set these before the
+                    # dict becomes the stored result.
+                    result["finished_at_epoch"] = time.time()
+                    st.session_state["result"] = result
+                    st.session_state.pop(RESTORED_KEY, None)
+                    try:
+                        save_last_run(result)
+                    except (OSError, TypeError) as error:
+                        # The on-screen result stays usable. Only a reload
+                        # loses it, so this is a warning, not a stop.
+                        st.warning(
+                            "The result is on this page, but it could not be "
+                            f"saved for a reload: {error}"
                         )
             finally:
                 # A normal variable is forgotten on every rerun. Streamlit
                 # starts this file over from the top on a click, so the
                 # finish time has to live in st.session_state. That dict
-                # stays with this browser tab.
+                # stays with this browser tab, and the same epoch value is
+                # saved with the result for a reload.
                 #
                 # The wait starts here, after the attempt, not at the click.
                 # Clicks during the spinner are handled only on the next
                 # rerun, once this file has returned. Those queued clicks
                 # still need a full minute, or they would start a second paid run.
-                st.session_state[RUN_FINISHED_KEY] = time.monotonic()
+                st.session_state[RUN_FINISHED_KEY] = time.time()
         except Stop as error:
             st.error(str(error))
         except ProviderError as error:
@@ -625,6 +1051,14 @@ if "result" in st.session_state:
     apkg_bytes = result.get("apkg_bytes")
     st.header("Preview", icon=":material/visibility:")
     st.caption(_preview_caption(mode, note, apkg_bytes, brief))
+    if st.session_state.get(RESTORED_KEY):
+        st.caption(
+            ":material/history: Restored from the last run on this computer. "
+            "No credits were spent."
+        )
+    # A compact line, not a metrics row. An older saved result has no
+    # usage key, so _show_usage draws nothing for it.
+    _show_usage(result.get("usage"))
     # A horizontal container keeps the downloads on one row. A missing
     # file is left out, so the caption does not promise it either.
     if note is not None or apkg_bytes is not None:
@@ -647,6 +1081,34 @@ if "result" in st.session_state:
                     key="download_apkg",
                     icon=":material/download:",
                 )
+    # One saved dict supplies both the preview and the reload. Clearing
+    # it removes only this local copy; downloads already taken stay.
+    # The confirmation key includes this run's finish time, so a new
+    # result starts with an unchecked box.
+    clear_stamp = result.get("finished_at_epoch", "older")
+    with st.popover("Clear saved result", icon=":material/delete_sweep:"):
+        st.caption(
+            "This removes the result from this page and the saved copy on "
+            "this computer. Files you already downloaded are not affected."
+        )
+        confirmed = st.checkbox(
+            "Confirm clear",
+            key=f"confirm_clear_saved_result:{clear_stamp}",
+        )
+        if st.button(
+            "Clear saved result",
+            icon=":material/delete:",
+            disabled=not confirmed,
+            key=f"clear_saved_result:{clear_stamp}",
+        ):
+            try:
+                clear_last_run()
+            except OSError as error:
+                st.error(f"Could not remove the saved result: {error}")
+            else:
+                st.session_state.pop("result", None)
+                st.session_state.pop(RESTORED_KEY, None)
+                st.rerun()
     if note is not None:
         with st.expander("Note", expanded=True, icon=":material/article:"):
             st.markdown(note)
@@ -660,3 +1122,44 @@ if "result" in st.session_state:
     if brief is not None and brief != "":
         with st.expander("Style notes", expanded=False, icon=":material/ink_pen:"):
             st.markdown(brief)
+    # Cards only never measured a style, so this save control is hidden
+    # on that path. A restored note run can still save its style.
+    if mode != "cards" and brief is not None and brief != "":
+        measured_text, median_words, longest_words = _style_measured(
+            result.get("measured")
+        )
+        with st.expander(
+            "Save this style for later",
+            expanded=False,
+            icon=":material/bookmark_add:",
+        ):
+            st.caption(
+                "Save this run's style brief and measured word counts under "
+                "a name. Saving a name that already exists replaces it."
+            )
+            with st.form("save_run_style"):
+                name = st.text_input(
+                    "Name",
+                    placeholder="For example: Biology lecture notes",
+                    key="run_style_name",
+                )
+                submitted = st.form_submit_button(
+                    "Save style",
+                    icon=":material/save:",
+                )
+                if submitted:
+                    try:
+                        saved = save_profile(
+                            name,
+                            brief,
+                            measured_text=measured_text,
+                            median_words=median_words,
+                            longest_words=longest_words,
+                        )
+                    except (ValueError, OSError) as error:
+                        st.error(f"Could not save the style: {error}")
+                    else:
+                        st.session_state[STYLE_NOTICE_KEY] = (
+                            f'Saved the style "{saved.name}".'
+                        )
+                        st.rerun()

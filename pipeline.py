@@ -473,16 +473,27 @@ def _saved_style(
     no summarizer call. A blank brief is a missing result, so Stop is
     raised before the drafter runs.
 
-    A stored profile may have no measurements. The fallback text tells
-    the drafter to follow the length in the brief, and the zero counts
-    tell _draft_note not to run the length retry. The dict keeps the
-    same keys as measure_example_notes, so the drafter reads it the
-    same way on both paths.
+    A stored profile may have no measurements. When it has a numeric
+    target but no measured summary, that number is written into the
+    measured text. With no number either, the fallback text tells the
+    drafter to follow the length in the brief, and the zero counts tell
+    _draft_note not to run the length retry. The dict keeps the same
+    keys as measure_example_notes, so the drafter reads it the same way
+    on both paths.
     """
     if brief.strip() == "":
         raise Stop("The saved style is empty.")
+    median = float(median_words or 0.0)
+    longest = int(longest_words or 0)
     if measured_text is not None and measured_text.strip() != "":
         text = measured_text.strip()
+    elif median > 0:
+        # A hand-made profile may give a typical length but no
+        # measured summary. Put that number in the same place the
+        # drafter expects measured facts, so the target is not lost.
+        text = f"Median word count: {_format_number(median)}"
+        if longest > 0:
+            text += f"\nLongest word count: {longest}"
     else:
         text = (
             "No measured facts. Follow the length described in the "
@@ -490,8 +501,8 @@ def _saved_style(
         )
     return brief, {
         "text": text,
-        "median_words": float(median_words or 0.0),
-        "longest_words": int(longest_words or 0),
+        "median_words": median,
+        "longest_words": longest,
         "word_counts": [],
     }
 
