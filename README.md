@@ -117,7 +117,7 @@ There are two ways to make one:
 - After a successful note or both run, open **Save this style for later** in Preview, type a name, then click **Save style**. This stores that run's style brief and measured word counts.
 - In step 2, open **Add a style summary**, type a name, paste a style summary, and optionally give a typical word count. Use the count when you know the length you want; the drafter treats it as the target. With no count, the drafter follows the length described in the summary and does not invent a median. A saved style with no count also gets no length retry, because there is no measured target to compare against.
 
-To use one, choose **Saved style** in step 2 and pick it from the list. You can view the summary before a run, or delete it after checking the confirmation box. Deleting removes only the saved copy on this computer. Saving a name that already exists replaces the old summary.
+To use one, choose **Saved style** in step 2 and pick it from the list. You can view the summary before a run, or delete it after checking the confirmation box. Deleting removes only the saved copy on this computer. Saving a name that already exists replaces the old summary and its word count; a count of 0 stores no measurements.
 
 A saved style skips the summarizer entirely. That saves one paid model call. It does not skip the drafter. On a both run it is two agent calls (drafter and card-creator) instead of three. On a notes-only run it is one instead of two. A cards-only run does not use a saved style: it still makes one card call, plus its possible retry.
 
@@ -129,9 +129,9 @@ A finished run shows a compact line such as:
 2 model calls · 1,200 input tokens · 300 output tokens
 ```
 
-The app records input and output tokens from the API response and counts each call itself. That includes photo vision calls and retries. The model-call count still goes up when a response arrives without a usage object, so the number of calls is not understated.
+The app records input and output tokens from the API response and counts each call itself. That includes photo vision calls and retries. The model-call count still goes up when a response arrives without a usage object, so the number of calls is not understated. If an attempt fails after one or more paid calls, the page still shows that attempt's counts, labeled "This attempt used". A failed attempt does not replace the last successful result.
 
-A dollar estimate appears only when both `INPUT_PRICE_PER_MTOK` and `OUTPUT_PRICE_PER_MTOK` are set in `.env`. Each is a price in US dollars per million tokens. The app does not hardcode prices. Without both, the line shows tokens only, and its help tooltip explains the two variables. The estimate is not a bill.
+A dollar estimate appears only when both `INPUT_PRICE_PER_MTOK` and `OUTPUT_PRICE_PER_MTOK` are set in `.env`. Each is a price in US dollars per million tokens. The app does not hardcode prices. Without both, the line shows tokens only, and its help tooltip explains the two variables. Restart the app after changing `.env`; prices are loaded when the app starts. The estimate is not a bill.
 
 The caption above Run shows "Up to N paid model calls" for the current mode, style source, and source files. It includes the retries that mode can make (the drafter length retry, the card retry, or both) and one vision call per photo page. A saved style with no typical word count cannot make the length retry, so its maximum is one lower. It is a spending guard, not an estimate from the API. A run may make fewer calls.
 
@@ -152,7 +152,7 @@ Both files are written with `0o600` permissions, so only your operating-system u
 
 The app sends each request with `store=False`, so the Responses API does not keep the response for later retrieval. OpenAI's own retention, abuse-monitoring, and account policies still apply to the request.
 
-Source text and example notes are not stored. A saved style stores only its brief and measured summary. The last run stores the generated note and card content, the deck bytes, the style brief, measured counts, token counts, and the finish time, when those pieces exist.
+Source files and example note files are not stored. The generated style brief can quote a few short lines from your examples, because the summarizer copies them. Those quotes are saved with the brief. A saved style stores only its name, brief, and measured summary. The last run stores the generated note and card content, the deck bytes, the style brief, measured counts, token counts, and the finish time, when those pieces exist.
 
 ## Tips
 
@@ -173,7 +173,7 @@ Source text and example notes are not stored. A saved style stores only its brie
 - An empty card list can be a valid result. When the run makes cards, the `.apkg` is still created. A study note by itself does not make a package.
 - If a reply hits the model's output-token limit, the run stops with a message instead of returning a cut-off note or deck. Try a shorter source.
 - Handwritten math in photos can be wrong.
-- Typed PDFs only include text already stored in the file. If equations are missing, use photos of those pages instead.
+- Typed PDFs only include text already stored in the file. If equations are missing, use photos of those pages instead. A corrupt or password-protected PDF is refused with a message.
 - `.txt` files and example `.md` files must be UTF-8. If one is not, the page shows a clear message instead of a traceback.
 - The last successful result restores after a reload. **Clear saved result** removes that local copy; files you already downloaded stay.
 - There is no card-editing screen, no revision loop, no model picker, no chunking, and no automated test suite.

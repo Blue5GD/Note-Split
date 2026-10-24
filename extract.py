@@ -100,12 +100,32 @@ def _read_pdf(data: bytes) -> str:
     # PyMuPDF reads text stored in the PDF. A drawn equation is not in
     # that text when the rest of the page is. This function does not try
     # to notice a missing equation.
-    document = pymupdf.open(stream=data, filetype="pdf")
+    #
+    # A user-supplied file can be empty, junk, or password-protected.
+    # PyMuPDF raises its own errors for those, and the page does not
+    # catch them. Turn them into Stop so the user sees a sentence
+    # instead of a traceback. EmptyFileError is a FileDataError.
     try:
+        document = pymupdf.open(stream=data, filetype="pdf")
+    except (pymupdf.FileDataError, ValueError) as exc:
+        raise Stop(
+            "This PDF could not be read. Export it again or upload photos."
+        ) from exc
+
+    try:
+        if document.needs_pass:
+            raise Stop(
+                "This PDF is password-protected. Remove the password "
+                "or upload photos."
+            )
         pages = []
         for page in document:
             pages.append(page.get_text())
         return "".join(pages)
+    except ValueError as exc:
+        raise Stop(
+            "This PDF could not be read. Export it again or upload photos."
+        ) from exc
     finally:
         document.close()
 

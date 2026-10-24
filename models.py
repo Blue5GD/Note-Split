@@ -102,11 +102,19 @@ def estimate_cost(usage: TokenUsage) -> float | None:
 
 
 def format_cost(cost: float | None) -> str:
-    """Return a short USD string, or an empty string for no estimate."""
+    """Return a short USD string, or an empty string for no estimate.
+
+    A small positive estimate that would round to $0.0000 is shown as
+    "<$0.0001" instead, so the line does not look free.
+    """
     if cost is None:
         return ""
+    if cost == 0:
+        return "$0.00"
     if cost >= 1:
         return f"${cost:.2f}"
+    if cost < 0.0001:
+        return "<$0.0001"
     return f"${cost:.4f}"
 
 

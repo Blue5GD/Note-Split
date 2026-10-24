@@ -7,8 +7,10 @@ again. last_run.json holds the last finished result, so a browser
 reload can show the note and the cards without another paid run.
 
 A style profile keeps only the brief and its measured summary. The
-last run keeps only the result the pipeline made. Source text and
-example notes are never written to either file.
+last run keeps only the result the pipeline made. Source files and
+example note files are never written to either file, but the brief
+can quote a few short lines from the examples, because the summarizer
+copies those lines. Those quotes are saved with the brief.
 
 Both files can hold private note text. A write goes to a temporary
 file in the same folder, then replaces the old file, and the final
@@ -113,7 +115,9 @@ def _stored_profile(name: str, stored: object) -> StyleProfile | None:
     if not isinstance(stored, dict):
         return None
     brief = stored.get("brief")
-    if not isinstance(brief, str):
+    # A whitespace-only brief would be listed, then Run would stop.
+    # Treat it as an unusable entry instead.
+    if not isinstance(brief, str) or brief.strip() == "":
         return None
     measured_text = stored.get("measured_text", "")
     if not isinstance(measured_text, str):

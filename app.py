@@ -80,6 +80,10 @@ PHOTO_ORDER_KEY = "photo_order"
 UPLOAD_STYLE = "Upload example notes"
 SAVED_STYLE = "Saved style"
 STYLE_NOTICE_KEY = "style_notice"
+# Changing these makes Streamlit build fresh text widgets, which clears
+# the form after a successful save.
+STYLE_FORM_NONCE_KEY = "style_form_nonce"
+RUN_STYLE_FORM_NONCE_KEY = "run_style_form_nonce"
 
 # True only while Preview is showing the run restored from disk. A new
 # successful run clears it.
@@ -416,9 +420,15 @@ def _show_order(files_in_default_order, state_key: str, drag_prefix: str, senten
     # Two files are the smallest list worth dragging. One file is
     # already in order, so it gets no widget.
     if len(default_labels) >= 2:
-        # Same sentence as before, in caption type, so the drag list
-        # does not look like another heading.
-        st.caption(":material/swap_vert: " + sentence)
+        # Same sentence as before, in caption type, so the order list
+        # does not look like another heading. The fallback uses buttons,
+        # so do not tell the user to drag when the package is missing.
+        if sort_items is None:
+            st.caption(
+                ":material/swap_vert: Use Up and Down to order these files."
+            )
+        else:
+            st.caption(":material/swap_vert: " + sentence)
         returned = _drag_list(
             _kept_order(st.session_state.get(state_key), default_labels),
             _drag_widget_key(drag_prefix, default_labels),
@@ -517,16 +527,21 @@ def _saved_style_panel() -> StyleProfile | None:
             "No saved styles yet. Add a summary below, then choose it here."
         )
 
+    nonce = st.session_state.get(STYLE_FORM_NONCE_KEY, 0)
     with st.expander(
         "Add a style summary",
         expanded=False,
         icon=":material/add:",
     ):
+        st.caption(
+            "Saving a name that already exists replaces its summary and "
+            "word count. A count of 0 means no measurements."
+        )
         with st.form("add_style_profile"):
             name = st.text_input(
                 "Name",
                 placeholder="For example: Biology lecture notes",
-                key="new_style_name",
+                key=f"new_style_name:{nonce}",
             )
             brief = st.text_area(
                 "Style summary",
@@ -535,7 +550,7 @@ def _saved_style_panel() -> StyleProfile | None:
                     "Describe length, headings, math habits, and what the "
                     "notes avoid."
                 ),
-                key="new_style_brief",
+                key=f"new_style_brief:{nonce}",
             )
             words = st.number_input(
                 "Typical words per note",
@@ -546,7 +561,7 @@ def _saved_style_panel() -> StyleProfile | None:
                     "Optional. Used as both the median and the longest "
                     "target length."
                 ),
-                key="new_style_words",
+                key=f"new_style_words:{nonce}",
             )
             submitted = st.form_submit_button(
                 "Save style",
@@ -566,6 +581,7 @@ def _saved_style_panel() -> StyleProfile | None:
                 except (ValueError, OSError) as error:
                     st.error(f"Could not save the style: {error}")
                 else:
+                    st.session_state[STYLE_FORM_NONCE_KEY] = nonce + 1
                     st.session_state[STYLE_NOTICE_KEY] = (
                         f'Saved the style "{saved.name}".'
                     )
@@ -598,13 +614,22 @@ def _style_measured(measured) -> tuple[str, float, int]:
     return text, float(median_words), int(longest_words)
 
 
-def _show_usage(usage_data) -> None:
+def _token_count(count: int, noun: str) -> str:
+    """One count with a singular or plural noun."""
+    word = noun if count == 1 else noun + "s"
+    return f"{count:,} {word}"
+
+
+def _show_usage(usage_data, prefix: str = "") -> None:
     """Draw the compact token and cost line for a finished run.
 
     An older saved result has no usage key, so that line is left out.
     A malformed dict is left out too. The dollar estimate appears only
     when both price variables are set, because estimate_cost returns
     None otherwise. The help text says how to turn it on.
+
+    prefix is for a failed attempt. It goes before the counts, so that
+    line is not mistaken for the last successful result.
     """
     if not isinstance(usage_data, dict):
         return
@@ -615,17 +640,17 @@ def _show_usage(usage_data) -> None:
     if usage.calls <= 0:
         return
     call_word = "call" if usage.calls == 1 else "calls"
-    line = (
+    line = prefix + (
         f"{usage.calls} model {call_word} · "
-        f"{usage.input_tokens:,} input tokens · "
-        f"{usage.output_tokens:,} output tokens"
+        f"{_token_count(usage.input_tokens, 'input token')} · "
+        f"{_token_count(usage.output_tokens, 'output token')}"
     )
     cost_text = format_cost(estimate_cost(usage))
     help_text = None
     if cost_text == "":
         help_text = (
             "Add INPUT_PRICE_PER_MTOK and OUTPUT_PRICE_PER_MTOK to .env "
-            "to show an estimated dollar cost."
+            "and restart the app to show an estimated dollar cost."
         )
     else:
         line += f" · est. {cost_text}"
@@ -747,7 +772,7 @@ def _show_cooldown() -> None:
         amount = f"{left} seconds"
     with st.container(border=True):
         st.markdown(
-            ":material/hourglass_top: This run uses API credits. "
+            ":material/hourglass_top: An attempt was just made. "
             f"You can start another in {amount}."
         )
 
@@ -762,6 +787,14 @@ st.markdown(
     "only the facts you need word for word. You can make a study note, "
     "flashcards, or both, and cards only uses the source."
 )
+
+# Save and delete style actions live in different parts of the page.
+# Show their notice in one place that is drawn for every mode, so a
+# style saved from a restored preview is not silently swallowed when
+# the checkboxes are on cards only.
+style_notice = st.session_state.pop(STYLE_NOTICE_KEY, None)
+if style_notice:
+    st.caption(":material/check_circle: " + style_notice)
 
 # These two boxes only pick the mode. A narrow window stacks the
 # columns. A wide window keeps them side by side. Unchecking one
@@ -809,9 +842,6 @@ with st.container(border=True):
                 "styles are not used and are not sent to the model."
             )
     else:
-        notice = st.session_state.pop(STYLE_NOTICE_KEY, None)
-        if notice:
-            st.caption(":material/check_circle: " + notice)
         style_choice = st.radio(
             "Choose a style source",
             [UPLOAD_STYLE, SAVED_STYLE],
@@ -920,10 +950,10 @@ if run_mode is not None:
         and float(selected_profile.median_words or 0.0) > 0
         and int(selected_profile.longest_words or 0) > 0
     )
-    length_retry = (
-        style_choice != SAVED_STYLE
-        or selected_profile is None
-        or saved_has_target
+    # No saved profile means Run stops before any call, so do not claim
+    # a length retry either.
+    length_retry = style_choice != SAVED_STYLE or (
+        selected_profile is not None and saved_has_target
     )
     max_calls = _max_paid_calls(
         run_mode,
@@ -954,6 +984,12 @@ if st.button(
     # A click during the wait must not read the notes or call the model.
     # The note under the button says how many seconds are left.
     if _seconds_left() == 0:
+        # One collector for the whole attempt. If a later call fails,
+        # this still holds the counts for the calls that were paid for.
+        usage = TokenUsage()
+        # Set only after the pipeline returns. The saved result and the
+        # in-session wait then share one finish time.
+        finished_at = None
         try:
             _reject_bad_upload(
                 examples,
@@ -969,9 +1005,8 @@ if st.button(
             # box checked, never reaches this try, so it does not start
             # the wait.
             try:
-                # One collector per run. Photo pages add their vision
-                # calls, and the pipeline adds one entry per model call.
-                usage = TokenUsage()
+                # Photo pages add their vision calls, and the pipeline
+                # adds one entry per model call, to the collector above.
                 with st.spinner(spinner_text):
                     if run_mode == "cards":
                         # Skip _example_text on this branch. A normal read
@@ -1044,9 +1079,11 @@ if st.button(
                     # here keeps a failed later run from clearing Preview.
                     result["usage"] = usage.as_dict()
                     # Epoch seconds, so a reload can restore this exact
-                    # wait along with the result. Set these before the
-                    # dict becomes the stored result.
-                    result["finished_at_epoch"] = time.time()
+                    # wait along with the result. The wait below uses the
+                    # same value, so a reload does not shorten it. Set
+                    # this before the dict becomes the stored result.
+                    finished_at = time.time()
+                    result["finished_at_epoch"] = finished_at
                     st.session_state["result"] = result
                     st.session_state.pop(RESTORED_KEY, None)
                     try:
@@ -1069,11 +1106,17 @@ if st.button(
                 # Clicks during the spinner are handled only on the next
                 # rerun, once this file has returned. Those queued clicks
                 # still need a full minute, or they would start a second paid run.
-                st.session_state[RUN_FINISHED_KEY] = time.time()
+                st.session_state[RUN_FINISHED_KEY] = (
+                    finished_at if finished_at is not None else time.time()
+                )
         except Stop as error:
             st.error(str(error))
+            # Calls made before the stop were still paid for. Show them
+            # without replacing the last successful result.
+            _show_usage(usage.as_dict(), prefix="This attempt used ")
         except ProviderError as error:
             st.error(str(error))
+            _show_usage(usage.as_dict(), prefix="This attempt used ")
 
 # Only while a wait is stored. An idle page does not register the
 # once-a-second note, so opening the app does not keep rerunning.
@@ -1158,6 +1201,10 @@ if "result" in st.session_state:
             st.markdown(note)
     if cards is not None:
         with st.expander("Cards", expanded=True, icon=":material/style:"):
+            if not cards:
+                st.caption(
+                    "No cards were returned. The deck download is empty."
+                )
             for index, card in enumerate(cards):
                 if index > 0:
                     st.divider()
@@ -1179,13 +1226,15 @@ if "result" in st.session_state:
         ):
             st.caption(
                 "Save this run's style brief and measured word counts under "
-                "a name. Saving a name that already exists replaces it."
+                "a name. Saving a name that already exists replaces it and "
+                "its word count."
             )
+            run_nonce = st.session_state.get(RUN_STYLE_FORM_NONCE_KEY, 0)
             with st.form("save_run_style"):
                 name = st.text_input(
                     "Name",
                     placeholder="For example: Biology lecture notes",
-                    key="run_style_name",
+                    key=f"run_style_name:{run_nonce}",
                 )
                 submitted = st.form_submit_button(
                     "Save style",
@@ -1203,6 +1252,9 @@ if "result" in st.session_state:
                     except (ValueError, OSError) as error:
                         st.error(f"Could not save the style: {error}")
                     else:
+                        st.session_state[RUN_STYLE_FORM_NONCE_KEY] = (
+                            run_nonce + 1
+                        )
                         st.session_state[STYLE_NOTICE_KEY] = (
                             f'Saved the style "{saved.name}".'
                         )
