@@ -11,6 +11,9 @@ __pycache__/
 .venv/
 venv/
 
+# Local profiles and last-run cache, never committed
+.note-split/
+
 # Leftover Anki decks
 *.apkg
 
