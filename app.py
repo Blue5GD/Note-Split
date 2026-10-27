@@ -217,27 +217,30 @@ def _mixes_pdf_and_txt(sources) -> bool:
     return pdf_count > 0 and pdf_count < len(sources)
 
 
-def _source_text(sources, photos, usage=None) -> str:
-    """Read the source files and return one string.
+def _source_text(sources, photos, usage=None, instruction=""):
+    """Read the source files and return the text plus skipped photo names.
 
-    Call this only after check_example_notes has returned, or on a
-    saved-style run that skips that check. Photos go in as
-    (filename, bytes) pairs, and usage collects one vision call per
-    page. Every txt or PDF goes in the same way. Both lists already
-    follow the order chosen above the Run button. This function does
-    not sort.
+    The return value is (text, skipped names). A typed source has an
+    empty skipped list. Call this only after check_example_notes has
+    returned, or on a saved-style run that skips that check. Photos go
+    in as (filename, bytes) pairs, and usage collects one vision call
+    per page, including a page that is later skipped. instruction is
+    pasted onto the photo prompt. A typed source does not use it here;
+    the pipeline still receives it. Every txt or PDF goes in the same
+    way. Both lists already follow the order chosen above the Run
+    button. This function does not sort.
     """
     if photos:
         pairs = []
         for photo in photos:
             pairs.append((photo.name, photo.getvalue()))
-        return extract_photos(pairs, usage=usage)
+        return extract_photos(pairs, usage=usage, instruction=instruction)
     # getvalue() returns the whole file on every Run. read() would leave
     # the pointer at the end, so a second Run could see an empty file.
     pairs = []
     for source in sources:
         pairs.append((source.name, source.getvalue()))
-    return extract_sources(pairs)
+    return extract_sources(pairs), []
 
 
 def _labels_for_names(names: list[str]) -> list[str]:
@@ -657,6 +660,39 @@ def _show_usage(usage_data, prefix: str = "") -> None:
     st.caption(":material/payments: " + line, help=help_text)
 
 
+def _show_skipped_photos(skipped) -> None:
+    """Warn when some photo pages were left out of the source.
+
+    A missing key, or a value that is not a list of names, draws
+    nothing. An older saved result has no skipped_photos key. An empty
+    list means nothing was left out. The warning stays with the result,
+    so a download click or a reload still names the pages.
+    """
+    if not isinstance(skipped, list) or not skipped:
+        return
+    names = []
+    for name in skipped:
+        if not isinstance(name, str) or name.strip() == "":
+            return
+        names.append(name)
+    if len(names) == 1:
+        body = (
+            f"{names[0]} was not added to the source. It looked blank, or "
+            "it had only doodles and crossed-out writing. The run uses the "
+            "other pages. To keep this page, say so in the instruction box "
+            "and run again."
+        )
+    else:
+        listed = ", ".join(names)
+        body = (
+            f"These pages were not added to the source: {listed}. They "
+            "looked blank, or they had only doodles and crossed-out writing. "
+            "The run uses the other pages. To keep one of them, name it in "
+            "the instruction box and run again."
+        )
+    st.warning(body, title="Some photos had no lecture content")
+
+
 def _max_paid_calls(
     mode, style_choice, photo_count: int, length_retry: bool = True
 ) -> int:
@@ -895,6 +931,10 @@ with st.container(border=True):
             help="png, jpg, or jpeg.",
         )
         st.caption("HEIC photos need to be exported as JPEG first.")
+        st.caption(
+            "Handwritten math is kept. Doodles, crossed-out work, and "
+            "margin scribbles are left out."
+        )
         photos_to_read = _show_order(
             _photos_in_filename_order(photos),
             PHOTO_ORDER_KEY,
@@ -906,11 +946,12 @@ with st.container(border=True):
     st.subheader("4. Instruction", icon=":material/edit_note:")
     st.caption(
         "Optional. Empty is fine. Use this when the new note should differ "
-        "from the style source."
+        "from the style source, or when a photo should keep something the "
+        "reader would otherwise leave out."
     )
     instruction = st.text_area(
         "Optional instruction",
-        placeholder="For example: keep it shorter than the examples, or use my wording for definitions.",
+        placeholder="For example: keep it shorter than the examples, or keep the margin notes on the last page.",
         height=120,
     )
 
@@ -1015,10 +1056,11 @@ if st.button(
                         # and it must not call check_example_notes. The
                         # empty string and None are placeholders. The
                         # pipeline does not read example notes in this mode.
-                        source = _source_text(
+                        source, skipped_photos = _source_text(
                             sources_to_read,
                             photos_to_read,
                             usage=usage,
+                            instruction=instruction,
                         )
                         result = run_pipeline(
                             "",
@@ -1034,10 +1076,11 @@ if st.button(
                         # and do not call check_example_notes. The saved
                         # style replaces the summarizer, so no paid call
                         # is spent writing a new brief.
-                        source = _source_text(
+                        source, skipped_photos = _source_text(
                             sources_to_read,
                             photos_to_read,
                             usage=usage,
+                            instruction=instruction,
                         )
                         result = run_pipeline(
                             "",
@@ -1056,10 +1099,11 @@ if st.button(
                         # Before the source is read, and before any photo is sent.
                         check_example_notes(example_notes)
                         # The lists above are already in the dragged order.
-                        source = _source_text(
+                        source, skipped_photos = _source_text(
                             sources_to_read,
                             photos_to_read,
                             usage=usage,
+                            instruction=instruction,
                         )
                         # run_pipeline returns when the note is done. A both
                         # run also waits for the .apkg bytes. This local
@@ -1077,6 +1121,12 @@ if st.button(
 
                     # The run succeeded. Replacing the stored result only
                     # here keeps a failed later run from clearing Preview.
+                    # skipped_photos names the photo pages the reader left
+                    # out. An empty list means every page had lecture
+                    # content, or the source was typed. Preview shows a
+                    # warning when the list is not empty, including after
+                    # a reload.
+                    result["skipped_photos"] = skipped_photos
                     result["usage"] = usage.as_dict()
                     # Epoch seconds, so a reload can restore this exact
                     # wait along with the result. The wait below uses the
@@ -1146,6 +1196,7 @@ if "result" in st.session_state:
     # A compact line, not a metrics row. An older saved result has no
     # usage key, so _show_usage draws nothing for it.
     _show_usage(result.get("usage"))
+    _show_skipped_photos(result.get("skipped_photos"))
     # A horizontal container keeps the downloads on one row. A missing
     # file is left out, so the caption does not promise it either.
     if note is not None or apkg_bytes is not None:

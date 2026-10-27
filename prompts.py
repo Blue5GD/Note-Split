@@ -3,7 +3,9 @@
 This file does not call the model. It holds the instruction strings:
 the summarizer, the drafter, two card-creator prompts, and the photo
 transcription. Later code pastes the notes, the measured facts, the
-source, and the optional instruction onto these strings. Cards-only
+source, and the optional instruction onto these strings. The photo
+prompt gets that same optional instruction, so a line in the box can
+tell the reader to keep a mark it would otherwise leave out. Cards-only
 mode uses the source-only card prompt and does not paste example notes.
 Do not run them through str.format. The card example contains brace
 characters.
@@ -44,6 +46,8 @@ The note is for understanding: connections between ideas, patterns, and how the 
 
 You will be given the source text, a style brief, measured facts about the example notes, and an optional instruction. The instruction may be empty. The measured facts may be missing or contain no median when the brief is a saved style summary.
 
+The source may still contain a leftover doodle, scribble, crossed-out attempt, or other mark that is not part of the lecture. Leave that out of the note. Handwritten math, definitions, derivations, and worked examples are lecture content, so they stay. If the optional instruction asks to keep something specific, follow the instruction.
+
 Treat the style brief as the authority on format and voice. A saved style summary is authoritative style guidance even when it carries no measurements.
 
 For length:
@@ -72,6 +76,8 @@ Flashcards are only for pieces of information that a test requires the student t
 
 About 10% of the distinct pieces of information become cards. That is a default, not a quota. A conceptual class may need fewer. A memorization-heavy class may need more. Do not fill the deck just to reach 10%. Do not dump the whole note into Anki.
 
+Do not make a card from a doodle, a crossed-out attempt, or text that is not lecture content. If the optional instruction asks to keep a specific fact, follow the instruction. The recall rule still applies.
+
 The optional instruction may ask for more of those recall facts or fewer. That density change still has to obey the recall rule above. The instruction does not override the hard constraints. It may not dump the note into Anki, and it may not ask for a card the student can rebuild from the note.
 
 Hard constraints:
@@ -90,8 +96,8 @@ Math inside front and back uses Obsidian delimiters: $...$ inline and $$...$$ fo
 Double every LaTeX backslash. In the example, the card's \frac is written \\frac in the JSON text. A single backslash is the bug this prevents: in JSON, \f is a form feed, so \frac is corrupted, and the same happens for \t, \b, \r, and \n. Write a line break inside a string as \n. Put no raw newline inside a string.
 """
 
-# Cards-only mode. The prompt above is unchanged and still expects a
-# finished note. This one does not: there is no note in that mode.
+# Cards-only mode. The prompt above still expects a finished note.
+# This one does not: there is no note in that mode.
 CARD_CREATOR_SOURCE_ONLY = r"""You choose flashcards from the source text and an optional instruction. The instruction may be empty.
 
 There is no study note and no example notes. Choose cards from the source only.
@@ -101,6 +107,8 @@ Cards are only facts a test requires word for word: arbitrary facts, exact formu
 Do not make a card for material the student can rebuild by reasoning. Do not make a card for every sentence. Do not paste the source into the deck.
 
 About 10% of the distinct pieces is a default, not a quota. The optional instruction may ask for more or fewer of those recall facts. It does not override the hard constraints.
+
+Do not make a card from a doodle, a crossed-out attempt, or text that is not lecture content. If the optional instruction asks to keep a specific fact, follow the instruction. The recall rule still applies.
 
 Hard constraints:
 - Cards are only the word-for-word recall facts described above.
@@ -121,9 +129,20 @@ Double every LaTeX backslash. In the example, the card's \frac is written \\frac
 """
 
 # One vision call transcribes one photo. This is not a fourth agent.
+# extract.py pastes the optional instruction after this string. That
+# line can keep or drop a specific mark. It cannot add a commentary,
+# and it cannot ask the model to invent a formula it cannot read.
 VISION_PROMPT = """You transcribe one page of notes from a photo.
 
 Return only the transcription of this page. No preamble, no commentary, and no code fence.
 
-Write math with Obsidian delimiters: $...$ for inline math and $$...$$ for display math.
+Write math with Obsidian delimiters: $...$ for inline math and $$...$$ for display math. Keep fractions, limits, integrals, derivatives, subscripts, and superscripts as they appear.
+
+Keep the lecture content. That includes handwritten math, definitions, derivations, and worked examples. Do not skip a line just because the handwriting is messy.
+
+Leave out doodles, smudges, crossed-out attempts, and margin marks that are not part of the lecture. If the page has no lecture content, return nothing. Do not write a sentence that says the page was empty.
+
+Do not guess a formula you cannot read. Omit that mark instead of inventing symbols.
+
+You may also be given an optional instruction. It may be empty. If it asks to keep or drop something specific, follow the instruction. The instruction does not override the rules above: return only the transcription, and do not invent symbols you cannot read.
 """

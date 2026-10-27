@@ -18,7 +18,7 @@ A note needs a style source. You upload one or more example notes, or you choose
 - Only Study note, saved style: the drafter only. One call.
 - Only Flashcards: the card-creator only. One call. Cards only is not a fourth agent. It skips the summarizer and the drafter, and it ignores both example notes and saved styles. The cards come from the source and the optional instruction.
 
-If you upload photos, the app transcribes them one page at a time before those calls. That is one vision call per photo page. It only reads the page. It is not a fourth agent. It adds to the paid calls for the run.
+If you upload photos, the app reads them one page at a time before those calls. That is one vision call per photo page. It is not a fourth agent. It adds to the paid calls for the run. The reader keeps the lecture, including handwritten math, definitions, derivations, and worked examples. It leaves out doodles, smudges, crossed-out attempts, and margin scribbles. It does not invent a formula it cannot read. The optional instruction is sent with each page, so you can tell it to keep or drop a specific mark. A page that comes back empty is skipped, and the other pages are still read. That skipped page was still a paid call. If every page is empty, the run stops and names the files. Preview then names any pages that were left out, and that list is saved with the result.
 
 Some runs make more calls than the lists above. The drafter may be called once more when the note comes out much longer than the measured target, or than the typical word count saved with a style. A saved style with no typical word count has no measured target, so it cannot make that length retry. The card-creator may be called once more when its reply has no usable cards. The page shows "Up to N paid model calls" above Run, and that number includes the retries the current choices can make and one call per photo page. The actual number depends on the replies.
 
@@ -100,7 +100,7 @@ The page has four steps.
    On a cards-only run, step 2 says the run only reads the source, and that example notes and saved styles are not used and are not sent.
 
 3. **Source.** Upload exactly one kind: several `.txt` files, or several PDFs, or photos (`png`, `jpg`, `jpeg`). Do not mix kinds in one run.
-4. **Instruction.** This box is optional. Leaving it empty is fine.
+4. **Instruction.** This box is optional. Leaving it empty is fine. It can change the note's style, how many cards are made, and what a photo keeps. For example, you can ask it to keep a margin note the reader would otherwise leave out.
 
 The button label follows the boxes. Both boxes: **Make the note and cards**. Only Study note: **Make the note**. Only Flashcards: **Make the cards**. Above the button, a caption shows "Up to N paid model calls" for the current choices.
 
@@ -152,7 +152,7 @@ Both files are written with `0o600` permissions, so only your operating-system u
 
 The app sends each request with `store=False`, so the Responses API does not keep the response for later retrieval. OpenAI's own retention, abuse-monitoring, and account policies still apply to the request.
 
-Source files and example note files are not stored. The generated style brief can quote a few short lines from your examples, because the summarizer copies them. Those quotes are saved with the brief. A saved style stores only its name, brief, and measured summary. The last run stores the generated note and card content, the deck bytes, the style brief, measured counts, token counts, and the finish time, when those pieces exist.
+Source files and example note files are not stored. The generated style brief can quote a few short lines from your examples, because the summarizer copies them. Those quotes are saved with the brief. A saved style stores only its name, brief, and measured summary. The last run stores the generated note and card content, the deck bytes, the style brief, measured counts, token counts, the finish time, and the filenames of any photo pages that had no lecture content, when those pieces exist. Photo bytes are not stored.
 
 ## Tips
 
@@ -164,7 +164,7 @@ Source files and example note files are not stored. The generated style brief ca
 - One kind of source only. The page stops if photos are mixed with a txt or PDF, or if a PDF is mixed with a txt.
 - iPhone HEIC photos must be exported as JPEG first. HEIC is the photo format an iPhone saves by default, and the page accepts png, jpg, and jpeg.
 - At most 20 photos. Two or more source files can be dragged. Photos start in filename order, so page-10 comes before page-2 unless the names are zero-padded (page-01, page-02) or you drag them.
-- The optional instruction can change style and how many cards are made. The prompts still forbid pasting the source unchanged and turning the whole note into cards, and the app does not check either afterward. In a cards-only run, the prompt also forbids turning the whole source into cards.
+- The optional instruction can change style, how many cards are made, and what a photo keeps or drops. The prompts still forbid pasting the source unchanged and turning the whole note into cards, and the app does not check either afterward. In a cards-only run, the prompt also forbids turning the whole source into cards. The instruction also cannot make the photo reader invent a formula it cannot read, or add a commentary around the transcription.
 - After a run that got past the upload check, the button waits 60 seconds. A click with no files does not start the wait. Neither box checked does not start the wait.
 - Several photos can take about a minute.
 - Math in the note and in the card preview uses `$` and `$$`. Only the `.apkg` writer converts the card text to Anki's `\(\)` and `\[\]`; `note.md` and the on-page preview keep `$` and `$$`.
@@ -172,7 +172,8 @@ Source files and example note files are not stored. The generated style brief ca
 - The conversion leaves common spaced dollar amounts alone, such as `$5 and $10` or `$3.50 to $4.25`. Tight inline math such as `$a$` still converts. A tight currency range such as `$5-$10` can still be mistaken for math. The app does not fully detect currency.
 - An empty card list can be a valid result. When the run makes cards, the `.apkg` is still created. A study note by itself does not make a package.
 - If a reply hits the model's output-token limit, the run stops with a message instead of returning a cut-off note or deck. Try a shorter source.
-- Handwritten math in photos can be wrong.
+- Handwritten math in photos can still be wrong. The reader keeps messy handwriting when it is part of the lecture, and it omits a mark it cannot read instead of guessing a formula.
+- Doodles, crossed-out work, and margin scribbles are left out of the source before the note and the cards are written. A page that is only that kind of writing is skipped. The other pages are still used, and Preview names the skipped file. A skipped page is still one paid vision call. If every photo is like that, the run stops. Remove those photos, or say in the instruction box to keep them, and run again.
 - Typed PDFs only include text already stored in the file. If equations are missing, use photos of those pages instead. A corrupt or password-protected PDF is refused with a message.
 - `.txt` files and example `.md` files must be UTF-8. If one is not, the page shows a clear message instead of a traceback.
 - The last successful result restores after a reload. **Clear saved result** removes that local copy; files you already downloaded stay.
@@ -182,8 +183,8 @@ Source files and example note files are not stored. The generated style brief ca
 
 - `app.py` — the web page: the checkboxes, the style source, the uploads, the Run button, the preview, the saved-style controls, the token line, and the saved-result restore and clear controls.
 - `models.py` — sends each request to OpenAI, asks for a JSON schema when a call needs one, returns the reply text, asks the provider not to store responses, and counts tokens. It also estimates a cost when both price variables are set.
-- `prompts.py` — holds the instruction text for the summarizer, the drafter, the card-creator, a separate cards-only instruction, and photo transcription.
-- `extract.py` — reads `.txt` files, PDFs, and photos, and turns them into one source string. It also handles photo transcription.
+- `prompts.py` — holds the instruction text for the summarizer, the drafter, the card-creator, a separate cards-only instruction, and photo transcription. The photo prompt receives the optional instruction.
+- `extract.py` — reads `.txt` files, PDFs, and photos, and turns them into one source string. A photo page with no lecture content is skipped, and its filename is returned with the text.
 - `pipeline.py` — runs the model calls for the chosen mode, reuses a saved style instead of calling the summarizer, checks the replies, parses the card JSON, and swaps math delimiters on a copy of the cards for the deck. Line breaks inside display math become spaces.
 - `anki_export.py` — escapes each field for HTML and turns the card list into the `.apkg` file.
 - `storage.py` — saves and loads style profiles and the last run in `.note-split/`.

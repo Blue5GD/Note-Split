@@ -3,8 +3,9 @@
 One .txt file or one typed PDF goes through extract_source. Several
 .txt files, or several PDFs, go through extract_sources. Those paths
 read the file bytes and do not call the model. Photos go through
-extract_photos. Each photo is one page and one vision call. The pages
-come back joined into one string.
+extract_photos. Each photo is one page and one vision call. A page
+with no lecture content is skipped. The pages that remain come back
+joined into one string, along with the names of the skipped pages.
 """
 
 import pymupdf
@@ -133,19 +134,29 @@ def _read_pdf(data: bytes) -> str:
 def extract_photos(
     photos: list[tuple[str, bytes]],
     usage: TokenUsage | None = None,
-) -> str:
-    """Turn photo pages into one string.
+    instruction: str = "",
+) -> tuple[str, list[str]]:
+    """Turn photo pages into one string, and name the pages left out.
 
     photos is a list of (filename, file_bytes) pairs. One pair is one
     page. The caller chooses the order. This function does not sort.
+    instruction is the optional box. It may be empty. It is pasted onto
+    the vision prompt so the reader can be told to keep a specific mark.
+
+    The return value is (joined text, skipped filenames). A skipped
+    page is one whose transcription is empty or only spaces. That is a
+    blank photo, or a page of doodles and crossed-out writing. The
+    other pages are still read. One doodle page does not throw away
+    the lecture pages around it. If every page is skipped, raise Stop
+    and name the files.
 
     usage, when given, collects the token counts from every vision
-    call, including a call whose page later turns out to be blank.
+    call, including a call whose page is later skipped. A skipped page
+    was still a paid call.
 
     More than MAX_PHOTOS raises Stop before any vision call. Each page
-    is one call. A blank page names that file and stops. Pages are
-    joined with a blank line. If the text so far passes the cap, the
-    remaining pages are not sent.
+    is one call. Kept pages are joined with a blank line. If the text
+    so far passes the cap, the remaining pages are not sent.
     """
     # The caller already chose the page order. Do not sort. The length
     # cap is still checked before any vision call.
@@ -153,19 +164,25 @@ def extract_photos(
         raise Stop(f"Upload at most {MAX_PHOTOS} photos.")
 
     pages: list[str] = []
+    skipped: list[str] = []
     joined = ""
     for filename, data in photos:
         reply = call_model(
-            VISION_PROMPT,
+            _vision_text(instruction),
             [{"data": data, "media_type": _media_type(filename)}],
             usage=usage,
         )
         # The model was told not to use a fence. If it wraps the whole
-        # page in one anyway, drop that fence, then check for a blank page.
-        # A fence in the middle of the page stays.
+        # page in one anyway, drop that fence, then check for a page
+        # with no lecture content. A fence in the middle of the page stays.
         text = _strip_one_fence(reply)
         if text.strip() == "":
-            raise Stop(f"The photo {filename} was blank.")
+            # Remember the name and keep going. The page shows this
+            # list after the run. Stopping here would discard the
+            # pages already paid for, and it would never read the
+            # later pages.
+            skipped.append(filename)
+            continue
         pages.append(text)
         joined = "\n\n".join(pages)
         # Same stop as a txt or PDF that is too long. Do not send the rest.
@@ -174,7 +191,41 @@ def extract_photos(
                 f"The source is longer than {MAX_SOURCE_CHARS:,} characters. "
                 "Upload a shorter source."
             )
-    return joined
+    if not pages:
+        raise Stop(_no_lecture_message(photos))
+    return joined, skipped
+
+
+def _vision_text(instruction: str) -> str:
+    """The photo prompt plus the optional instruction.
+
+    The instruction section is always present. An empty box is a blank
+    line, which the prompt already says is allowed. Do not use
+    str.format. The other prompts avoid it because of brace characters,
+    and this one is pasted the same way.
+    """
+    return VISION_PROMPT + "\nOptional instruction:\n" + instruction
+
+
+def _no_lecture_message(photos: list[tuple[str, bytes]]) -> str:
+    """The stop sentence when every photo had no lecture content.
+
+    One photo names that file. Several photos name every file, in the
+    order they were read. The sentence tells the user the two ways
+    forward: remove the photos, or say in the instruction box to keep
+    the writing.
+    """
+    names = [filename for filename, _data in photos]
+    if len(names) == 1:
+        return (
+            f"The photo {names[0]} had no lecture content. "
+            "Remove that photo, or say in the instruction box to keep it."
+        )
+    listed = ", ".join(names)
+    return (
+        f"These photos had no lecture content: {listed}. "
+        "Remove them, or say in the instruction box to keep them."
+    )
 
 
 def _media_type(filename: str) -> str:
