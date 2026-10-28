@@ -5,7 +5,6 @@ OpenAI library themselves. Stop is a sentence the page shows. ProviderError
 is a failure message that came from the provider.
 """
 
-import base64
 import math
 import os
 from dataclasses import dataclass
@@ -135,17 +134,12 @@ def _price(name: str) -> float | None:
 
 def call_model(
     text: str,
-    images: list[dict] | None = None,
     *,
     response_schema: dict | None = None,
     response_name: str = "result",
     usage: TokenUsage | None = None,
 ) -> str:
     """Send text to the model and return the reply text.
-
-    images is only for a photo page. Each item is a dict:
-        {"data": image_bytes, "media_type": "image/jpeg"}
-    media_type is "image/png" or "image/jpeg". Other calls leave images out.
 
     response_schema asks for structured output. The reply is still a
     string, but it holds JSON that follows that schema. response_name
@@ -171,7 +165,7 @@ def call_model(
     # retrieval. It does not change the reply.
     request = {
         "model": MODEL,
-        "input": _input(text, images),
+        "input": text,
         "max_output_tokens": MAX_OUTPUT_TOKENS,
         "store": False,
     }
@@ -212,23 +206,6 @@ def call_model(
         raise ProviderError(_provider_message(response))
 
     return response.output_text
-
-
-def _input(text: str, images: list[dict] | None):
-    if not images:
-        return text
-    content = [{"type": "input_text", "text": text}]
-    for image in images:
-        encoded = base64.b64encode(image["data"]).decode("ascii")
-        media_type = image["media_type"]
-        content.append(
-            {
-                "type": "input_image",
-                "image_url": f"data:{media_type};base64,{encoded}",
-                "detail": "auto",
-            }
-        )
-    return [{"role": "user", "content": content}]
 
 
 def _provider_message(response) -> str:

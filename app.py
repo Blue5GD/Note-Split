@@ -1,9 +1,9 @@
 """The one Streamlit page.
 
 Uploads stay on the page until the button is clicked. The pipeline, including
-the example-note check and any photo reading, starts only inside that
-click. A later click, such as a download, an expander, or a checkbox,
-reruns this script from the top and does not start the pipeline again.
+the example-note check, starts only inside that click. A later click, such as
+a download, an expander, or a checkbox, reruns this script from the top and
+does not start the pipeline again.
 
 Two boxes choose a study note, flashcards, or both. Cards only does
 not read example notes or a saved style. A note run takes its style
@@ -27,10 +27,13 @@ marked as restored, so the note and cards are shown without credits
 being spent. Saved styles live there too, so a brief that was already
 paid for can be used again.
 
-Two or more txt files, PDFs, or photos can be dragged into the order
-they should be read. Streamlit reruns this file on every widget
+Two or more .txt files, or two or more PDFs, can be dragged into the
+order they should be read. Streamlit reruns this file on every widget
 change and forgets a normal variable, so that order lives in
 st.session_state.
+
+The page is text-only. A handwritten page is transcribed outside the
+app and uploaded as a .txt file, so the page makes no vision calls.
 """
 
 import math
@@ -45,7 +48,7 @@ try:
 except ImportError:
     sort_items = None
 
-from extract import extract_photos, extract_sources
+from extract import extract_sources
 from models import (
     ProviderError,
     Stop,
@@ -65,15 +68,9 @@ from storage import (
     save_profile,
 )
 
-# This stop is only for a source file plus photos. Several .txt files,
-# or several PDFs, are one kind and are allowed. A .txt mixed with a
-# PDF uses a different sentence, below.
-ONE_KIND = "Upload one kind of source: .txt files, PDFs, or photos."
-
-# A rerun forgets a normal variable. These hold the dragged labels,
-# one list for txt/PDF files and one list for photos.
+# A rerun forgets a normal variable. This holds the dragged labels for
+# the source files.
 SOURCE_ORDER_KEY = "source_order"
-PHOTO_ORDER_KEY = "photo_order"
 
 # The two style choices. The saved path reuses a brief instead of
 # paying the summarizer to write a new one.
@@ -144,7 +141,6 @@ def _restore_last_run() -> None:
 def _reject_bad_upload(
     examples,
     sources,
-    photos,
     mode,
     style_choice,
     selected_profile,
@@ -152,8 +148,8 @@ def _reject_bad_upload(
     """Stop if Run was clicked without a usable choice or upload.
 
     This runs before example notes are read and before the source is
-    read. It looks at which kinds of files were chosen, not at their
-    bytes. Several .txt files are fine. Several PDFs are fine.
+    read. It looks at the filenames, not their bytes. Several .txt files
+    are fine. Several PDFs are fine.
 
     A notes run, or a run that makes both, still needs a style source.
     The upload path needs at least one example note. The saved path
@@ -174,13 +170,9 @@ def _reject_bad_upload(
                 raise Stop("Upload at least one example note.")
         else:
             raise Stop("Choose where the note's style should come from.")
-    if not sources and not photos:
-        raise Stop(
-            "Upload a source: one or more .txt files, one or more PDFs, or photos."
-        )
-    if sources and photos:
-        raise Stop(ONE_KIND)
-    if sources and _mixes_pdf_and_txt(sources):
+    if not sources:
+        raise Stop("Upload a source: one or more .txt files or one or more PDFs.")
+    if _mixes_pdf_and_txt(sources):
         raise Stop("Use only PDF files, or only .txt files, not both.")
 
 
@@ -217,30 +209,20 @@ def _mixes_pdf_and_txt(sources) -> bool:
     return pdf_count > 0 and pdf_count < len(sources)
 
 
-def _source_text(sources, photos, usage=None, instruction=""):
-    """Read the source files and return the text plus skipped photo names.
+def _source_text(sources) -> str:
+    """Read the source files and return one string.
 
-    The return value is (text, skipped names). A typed source has an
-    empty skipped list. Call this only after check_example_notes has
-    returned, or on a saved-style run that skips that check. Photos go
-    in as (filename, bytes) pairs, and usage collects one vision call
-    per page, including a page that is later skipped. instruction is
-    pasted onto the photo prompt. A typed source does not use it here;
-    the pipeline still receives it. Every txt or PDF goes in the same
-    way. Both lists already follow the order chosen above the Run
+    Call this only after check_example_notes has returned, or on a
+    saved-style or cards-only run that skips that check. Every .txt or
+    PDF goes in the same way. The list already follows the order chosen above the Run
     button. This function does not sort.
     """
-    if photos:
-        pairs = []
-        for photo in photos:
-            pairs.append((photo.name, photo.getvalue()))
-        return extract_photos(pairs, usage=usage, instruction=instruction)
     # getvalue() returns the whole file on every Run. read() would leave
     # the pointer at the end, so a second Run could see an empty file.
     pairs = []
     for source in sources:
         pairs.append((source.name, source.getvalue()))
-    return extract_sources(pairs), []
+    return extract_sources(pairs)
 
 
 def _labels_for_names(names: list[str]) -> list[str]:
@@ -264,18 +246,6 @@ def _labels_for_names(names: list[str]) -> list[str]:
         used[name] = used.get(name, 0) + 1
         labels.append(f"{name} ({used[name]})")
     return labels
-
-
-def _photos_in_filename_order(photos) -> list:
-    """The starting order for photos, before anyone drags.
-
-    Ordinary string order puts page-10.jpg before page-2.jpg, which
-    is how photos were read before dragging. Python keeps the old
-    order when two names are equal, so the numbers stay put.
-    """
-    if not photos:
-        return []
-    return sorted(list(photos), key=lambda photo: photo.name)
 
 
 def _sources_in_upload_order(sources) -> list:
@@ -660,70 +630,32 @@ def _show_usage(usage_data, prefix: str = "") -> None:
     st.caption(":material/payments: " + line, help=help_text)
 
 
-def _show_skipped_photos(skipped) -> None:
-    """Warn when some photo pages were left out of the source.
-
-    A missing key, or a value that is not a list of names, draws
-    nothing. An older saved result has no skipped_photos key. An empty
-    list means nothing was left out. The warning stays with the result,
-    so a download click or a reload still names the pages.
-    """
-    if not isinstance(skipped, list) or not skipped:
-        return
-    names = []
-    for name in skipped:
-        if not isinstance(name, str) or name.strip() == "":
-            return
-        names.append(name)
-    if len(names) == 1:
-        body = (
-            f"{names[0]} was not added to the source. It looked blank, or "
-            "it had only doodles and crossed-out writing. The run uses the "
-            "other pages. To keep this page, say so in the instruction box "
-            "and run again."
-        )
-    else:
-        listed = ", ".join(names)
-        body = (
-            f"These pages were not added to the source: {listed}. They "
-            "looked blank, or they had only doodles and crossed-out writing. "
-            "The run uses the other pages. To keep one of them, name it in "
-            "the instruction box and run again."
-        )
-    st.warning(body, title="Some photos had no lecture content")
-
-
 def _max_paid_calls(
-    mode, style_choice, photo_count: int, length_retry: bool = True
+    mode, style_choice, length_retry: bool = True
 ) -> int:
-    """The most paid calls the current mode, style, and source can make.
+    """The most paid calls the current mode and style can make.
 
     The counts include the one card retry and, when length_retry is
     true, the one drafter length retry. A saved style skips the
     summarizer, so its count is one lower. A saved style with no
     measurements cannot make the length retry, so pass False for it.
-    Each photo page is one vision call. No model call is made to work
-    this out.
+    No model call is made to work this out.
     """
     if mode == "cards":
-        base = 2
-    elif mode == "notes":
+        return 2
+    if mode == "notes":
         if style_choice == SAVED_STYLE:
-            base = 2 if length_retry else 1
-        else:
-            base = 3
-    elif mode == "both":
+            return 2 if length_retry else 1
+        return 3
+    if mode == "both":
         if style_choice == SAVED_STYLE:
-            base = 4 if length_retry else 3
-        else:
-            base = 5
-    else:
-        return 0
-    return base + photo_count
+            return 4 if length_retry else 3
+        return 5
+    return 0
 
 
 def _max_calls_help(
-    mode, style_choice, photo_count: int, length_retry: bool = True
+    mode, style_choice, length_retry: bool = True
 ) -> str:
     """The breakdown behind the maximum call caption."""
     if mode == "cards":
@@ -765,15 +697,6 @@ def _max_calls_help(
             )
     else:
         return "No mode is selected, so Run stops before any model call."
-
-    if photo_count == 1:
-        text += " 1 photo page adds one vision call."
-    elif photo_count > 1:
-        text += (
-            f" {photo_count} photo pages add one vision call each."
-        )
-    else:
-        text += " No photo pages, so no vision calls."
     return text
 
 
@@ -818,10 +741,9 @@ def _show_cooldown() -> None:
 # and does not call the model. That call stays inside the button.
 st.title("Note Split", icon=":material/menu_book:")
 st.markdown(
-    "Upload example notes or pick a saved style, plus one lecture or a set "
-    "of paper pages. The study note is for understanding, and the cards are "
-    "only the facts you need word for word. You can make a study note, "
-    "flashcards, or both, and cards only uses the source."
+    "Upload one lecture or a few pages of text. Add example notes or a saved "
+    "style when you want a study note. The note is for understanding, and "
+    "the cards are only the facts you need word for word."
 )
 
 # Save and delete style actions live in different parts of the page.
@@ -839,7 +761,7 @@ with st.container(border=True):
     st.subheader("1. What to make", icon=":material/checklist:")
     note_col, card_col = st.columns(2, gap="medium")
     with note_col:
-        # The icon is the heading, same as the typed-files heading.
+        # The icon is the heading, same as the source section heading.
         # The checkbox label is the choice itself, so the words are
         # not written twice.
         make_note = st.checkbox(
@@ -902,56 +824,34 @@ with st.container(border=True):
 
 with st.container(border=True):
     st.subheader("3. Source", icon=":material/upload_file:")
-    st.caption("Exactly one kind. Use typed files or photos, not both.")
-    # Two columns, because these boxes are alternatives. The page still
-    # refuses a run that fills both.
-    text_col, photo_col = st.columns(2, gap="medium")
-    with text_col:
-        st.markdown(":material/article: **Typed files**")
-        sources = st.file_uploader(
-            "Source text",
-            type=["txt", "pdf"],
-            accept_multiple_files=True,
-            help="Several .txt files, or several PDFs. Not a PDF mixed with a .txt.",
-        )
-        st.caption("Several .txt files, or several PDFs. Not a mix of the two.")
-        # Under the uploader, on every rerun, so the button sees this run's order.
-        sources_to_read = _show_order(
-            _sources_in_upload_order(sources),
-            SOURCE_ORDER_KEY,
-            "source_drag",
-            "Drag files into the order they should be read.",
-        )
-    with photo_col:
-        st.markdown(":material/photo_camera: **Paper photos**")
-        photos = st.file_uploader(
-            "Photos of paper notes",
-            type=["png", "jpg", "jpeg"],
-            accept_multiple_files=True,
-            help="png, jpg, or jpeg.",
-        )
-        st.caption("HEIC photos need to be exported as JPEG first.")
-        st.caption(
-            "Handwritten math is kept. Doodles, crossed-out work, and "
-            "margin scribbles are left out."
-        )
-        photos_to_read = _show_order(
-            _photos_in_filename_order(photos),
-            PHOTO_ORDER_KEY,
-            "photo_drag",
-            "Drag photos into page order.",
-        )
+    st.caption(
+        "Text only: several .txt files, or several typed PDFs. Do not mix "
+        "the two. Handwritten pages must be transcribed and saved as .txt "
+        "first."
+    )
+    sources = st.file_uploader(
+        "Source files",
+        type=["txt", "pdf"],
+        accept_multiple_files=True,
+        help="Several .txt files, or several PDFs. Not a PDF mixed with a .txt.",
+    )
+    # Under the uploader, on every rerun, so the button sees this run's order.
+    sources_to_read = _show_order(
+        _sources_in_upload_order(sources),
+        SOURCE_ORDER_KEY,
+        "source_drag",
+        "Drag files into the order they should be read.",
+    )
 
 with st.container(border=True):
     st.subheader("4. Instruction", icon=":material/edit_note:")
     st.caption(
         "Optional. Empty is fine. Use this when the new note should differ "
-        "from the style source, or when a photo should keep something the "
-        "reader would otherwise leave out."
+        "from the style source."
     )
     instruction = st.text_area(
         "Optional instruction",
-        placeholder="For example: keep it shorter than the examples, or keep the margin notes on the last page.",
+        placeholder="For example: keep it shorter than the examples, or focus on the last section.",
         height=120,
     )
 
@@ -963,28 +863,27 @@ if make_note and make_cards:
     run_mode = "both"
     button_label = "Make the note and cards"
     button_icon = ":material/auto_stories:"
-    spinner_text = "Writing the note and the cards. Several photos can take about a minute."
+    spinner_text = "Writing the note and the cards."
 elif make_note:
     run_mode = "notes"
     button_label = "Make the note"
     button_icon = ":material/auto_stories:"
-    spinner_text = "Writing the note. Several photos can take about a minute."
+    spinner_text = "Writing the note."
 elif make_cards:
     run_mode = "cards"
     button_label = "Make the cards"
     button_icon = ":material/style:"
-    spinner_text = "Writing the cards. Several photos can take about a minute."
+    spinner_text = "Writing the cards."
 else:
     run_mode = None
     button_label = "Make the note and cards"
     button_icon = ":material/auto_stories:"
-    spinner_text = "Writing the note and the cards. Several photos can take about a minute."
+    spinner_text = "Writing the note and the cards."
 
 # The caption above the button is a spend guard, not an estimate from
-# the API. Each photo page is one vision call. The counts include the
-# card retry and the drafter length retry, so they are maximums. A
-# saved style with no measurements cannot make the length retry, so
-# its maximum is one lower.
+# the API. The counts include the card retry and the drafter length
+# retry, so they are maximums. A saved style with no measurements
+# cannot make the length retry, so its maximum is one lower.
 if run_mode is not None:
     saved_has_target = (
         selected_profile is not None
@@ -999,7 +898,6 @@ if run_mode is not None:
     max_calls = _max_paid_calls(
         run_mode,
         style_choice,
-        len(photos_to_read),
         length_retry=length_retry,
     )
     call_word = "call" if max_calls == 1 else "calls"
@@ -1008,7 +906,6 @@ if run_mode is not None:
         help=_max_calls_help(
             run_mode,
             style_choice,
-            len(photos_to_read),
             length_retry=length_retry,
         ),
     )
@@ -1035,7 +932,6 @@ if st.button(
             _reject_bad_upload(
                 examples,
                 sources,
-                photos,
                 run_mode,
                 style_choice,
                 selected_profile,
@@ -1046,8 +942,8 @@ if st.button(
             # box checked, never reaches this try, so it does not start
             # the wait.
             try:
-                # Photo pages add their vision calls, and the pipeline
-                # adds one entry per model call, to the collector above.
+                # The pipeline adds one entry per model call to the
+                # collector above.
                 with st.spinner(spinner_text):
                     if run_mode == "cards":
                         # Skip _example_text on this branch. A normal read
@@ -1056,12 +952,7 @@ if st.button(
                         # and it must not call check_example_notes. The
                         # empty string and None are placeholders. The
                         # pipeline does not read example notes in this mode.
-                        source, skipped_photos = _source_text(
-                            sources_to_read,
-                            photos_to_read,
-                            usage=usage,
-                            instruction=instruction,
-                        )
+                        source = _source_text(sources_to_read)
                         result = run_pipeline(
                             "",
                             source,
@@ -1076,12 +967,7 @@ if st.button(
                         # and do not call check_example_notes. The saved
                         # style replaces the summarizer, so no paid call
                         # is spent writing a new brief.
-                        source, skipped_photos = _source_text(
-                            sources_to_read,
-                            photos_to_read,
-                            usage=usage,
-                            instruction=instruction,
-                        )
+                        source = _source_text(sources_to_read)
                         result = run_pipeline(
                             "",
                             source,
@@ -1096,15 +982,10 @@ if st.button(
                         )
                     else:
                         example_files, example_notes = _example_text(examples)
-                        # Before the source is read, and before any photo is sent.
+                        # Before the source is read.
                         check_example_notes(example_notes)
-                        # The lists above are already in the dragged order.
-                        source, skipped_photos = _source_text(
-                            sources_to_read,
-                            photos_to_read,
-                            usage=usage,
-                            instruction=instruction,
-                        )
+                        # The list above is already in the dragged order.
+                        source = _source_text(sources_to_read)
                         # run_pipeline returns when the note is done. A both
                         # run also waits for the .apkg bytes. This local
                         # dict is the first time a result is stored.
@@ -1121,12 +1002,6 @@ if st.button(
 
                     # The run succeeded. Replacing the stored result only
                     # here keeps a failed later run from clearing Preview.
-                    # skipped_photos names the photo pages the reader left
-                    # out. An empty list means every page had lecture
-                    # content, or the source was typed. Preview shows a
-                    # warning when the list is not empty, including after
-                    # a reload.
-                    result["skipped_photos"] = skipped_photos
                     result["usage"] = usage.as_dict()
                     # Epoch seconds, so a reload can restore this exact
                     # wait along with the result. The wait below uses the
@@ -1196,7 +1071,6 @@ if "result" in st.session_state:
     # A compact line, not a metrics row. An older saved result has no
     # usage key, so _show_usage draws nothing for it.
     _show_usage(result.get("usage"))
-    _show_skipped_photos(result.get("skipped_photos"))
     # A horizontal container keeps the downloads on one row. A missing
     # file is left out, so the caption does not promise it either.
     if note is not None or apkg_bytes is not None:

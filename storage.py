@@ -7,12 +7,10 @@ again. last_run.json holds the last finished result, so a browser
 reload can show the note and the cards without another paid run.
 
 A style profile keeps only the brief and its measured summary. The
-last run keeps only the result the pipeline made, plus the filenames
-of any photo pages that had no lecture content. Source files and
+last run keeps only the result the pipeline made. Source files and
 example note files are never written to either file, but the brief
 can quote a few short lines from the examples, because the summarizer
-copies those lines. Those quotes are saved with the brief. Photo
-bytes are not stored.
+copies those lines. Those quotes are saved with the brief.
 
 Both files can hold private note text. A write goes to a temporary
 file in the same folder, then replaces the old file, and the final
@@ -241,15 +239,6 @@ def _result_has_usable_text(result: dict) -> bool:
         value = result.get(key)
         if value is not None and not isinstance(value, str):
             return False
-    # Missing on a result saved before photo skipping existed. A present
-    # value must be a list of filenames, or Preview cannot name them.
-    skipped = result.get("skipped_photos")
-    if skipped is not None:
-        if not isinstance(skipped, list):
-            return False
-        for name in skipped:
-            if not isinstance(name, str):
-                return False
     cards = result.get("cards")
     if cards is None:
         return True
