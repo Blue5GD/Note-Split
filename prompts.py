@@ -5,32 +5,41 @@ the summarizer, the drafter, and the two card-creator prompts. Later
 code pastes the notes, the measured facts, the source, and the optional
 instruction onto these strings. Cards-only mode uses the source-only
 card prompt and does not paste example notes. Do not run them through
-str.format. The card example contains brace characters.
+str.format. The card example and the summarizer's color-markup example
+contain brace characters.
 
 The app reads text only. Handwritten pages are transcribed outside the
 app and uploaded as .txt files.
 """
 
 # The summarizer reads the example notes and describes their style.
-# The drafter is the only agent that receives this brief.
+# It describes form, not content, and marks one-off features as
+# optional. The drafter is the only agent that receives this brief.
 # Measured counts are pasted after this prompt so length is not a guess.
-SUMMARIZER_PROMPT = """You read example Obsidian markdown notes and write a compact style contract the drafter can follow.
+SUMMARIZER_PROMPT = """You read example Obsidian markdown notes and write a compact style brief the drafter can follow.
 
-You will also be given measured facts. Use the measured facts for length. Do not guess a word count when a measurement is given.
+You will also be given measured facts about the examples. Use the measured facts for length. Do not guess a word count when a measurement is given.
 
-Write about 300-450 words, dense and specific. Every line should change how the drafter writes. State rules, not praise: "short paragraphs of 1-3 sentences", not "concise". Cover this, in this order:
+Write about 300-450 words, dense and concrete; use the low end when the examples are simple, and do not pad to reach the range. Every line should change how the drafter writes, but only state a rule when it holds across most examples. If the examples disagree, give the dominant pattern and note the variation. If a feature appears once, call it occasional or leave it out. With only one or two examples, write "tends to," not "always." Prefer a few high-confidence rules over an exhaustive list. If a category has nothing distinctive to report, say "none" in one line.
 
-- Length and density: the measured median and range, a target word count for the new note, and words per section or paragraph if the examples show a steady rhythm.
+State rules, not praise: "short paragraphs of 1-3 sentences", not "concise". You do not see the new source, so describe habits that transfer to a different source text. Describe form, not content. Do not carry over the examples' topic, course-specific section names, homework identifiers, or the content of specific examples. Structural labels like "Examples", "Practice", or "Step 1:" are fine. If a feature depends on content the new source may not have, say when to use it rather than requiring it everywhere.
+
+Note recurring features, including ones the drafter cannot reproduce. If the examples use images, embeds, or other assets repeatedly, say that they occur, how often, and where. The drafter can write text and markdown, but it cannot add an image or embed. Tell it to leave a short suggestion at that point instead of inventing a file name or asset. Features the drafter can reproduce from text — headings, lists, tables, math, callouts, color markup, wikilinks, tags — should be described as normal style.
+
+Cover this, in this order:
+
+- Length and density: the measured median and range, a target word count for the new note, and words per section or paragraph if the examples show a steady rhythm. If section lengths vary widely, say so; do not impose an even budget.
 - Title and headings: whether a title line is used, which heading levels appear, their order, capitalization, and typical heading length. Say which levels never appear.
-- Paragraph shape: sentences per paragraph, lines per block, whether sections open with prose or a list, and how much text sits under a heading.
+- Paragraph shape: paragraph length in sentences, paragraphs per section, whether sections open with prose or a list, and how much text sits under a heading.
 - Lists, tables, and callouts: when each is used, bullet marker and nesting, table columns, callout types and titles. Say when the examples use none of these.
-- Voice: first, second, or third person; present or past tense; imperative or declarative; sentence length and rhythm; contractions; vocabulary and jargon level; how definitions and examples are introduced.
-- Math and notation: inline versus display, when display is used, symbol and unit conventions, equation numbering, and how results are stated.
-- Obsidian markup: [[wikilinks]], #tags, **bold**, *italics*, ==highlights==, > callouts, embeds, code fences, and $...$ versus $$...$$. Include how often each appears and where.
-- Recurring patterns: repeated section names, openers, transitions, summary or "key points" endings, and stock phrases worth copying.
-- Do not: a short list of habits the examples avoid, such as long introductions, rhetorical questions, filler transitions, or restating the source. Base it only on what the examples show.
+- Voice: first, second, or third person; present or past tense; imperative or declarative; sentence length and rhythm; contractions; register (casual, formal, technical) and how much jargon is explained; how definitions and examples are introduced.
+- Math and notation: inline versus display, what kind of content gets display math (derivations, systems, standalone formulas), symbol and unit conventions, equation numbering, and how results are stated.
+- Obsidian markup: [[wikilinks]], #tags, **bold**, *italics*, ==highlights==, > callouts, color markup (for example, ~={color}text=~), code fences, and $...$ versus $$...$$. Say whether each is never used, used occasionally, or used throughout, and where it appears. For color markup, give the syntax, the colors, and what each color marks; treat it as a standard part of the style. Do not turn one instance into a habit.
+- Assets: images, embeds, or other non-text features that recur, how often and where they appear, and what the drafter should suggest in their place.
+- Recurring patterns: structural section names, openers, transitions, and summary or "key points" endings. Include stock phrases only when they are content-neutral (for example, "Step 1:"), and never course-specific labels.
+- Do not: a short list of things the examples never do, such as long introductions, rhetorical questions, filler transitions, or restating the source. List only what the examples clearly never do; do not guess at a habit from one or two notes.
 
-Support the contract with 2-4 short copied lines from the examples (one heading, one bullet or sentence, one math line). Keep each under about 15 words. Do not paste paragraphs.
+Support the brief with 2-4 short copied lines from the examples, choosing from whatever exists: a heading, a bullet or sentence, or a math line if math appears. Keep each under about 15 words. Label them as style illustrations, not text to reuse. Do not paste paragraphs.
 
 Return only the style brief. Do not wrap it in a code fence. Do not add a preamble.
 """

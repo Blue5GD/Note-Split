@@ -1,13 +1,15 @@
 # Note Split
 
-Note Split turns a lecture into an Obsidian study note, an Anki deck, or both. The note is for understanding. The cards are only facts that must be recalled word for word. It was built for the Yale Computer Society Catalyst sprint.
+Note Split turns a lecture into an Obsidian study note, an Anki deck, or both. The note is for understanding, patterns, and quick reference. The cards are only facts that must be recalled word for word. This is based on Justin Sung's approach to note-making and recall. See his [YouTube channel](https://www.youtube.com/@JustinSung). It was built for the Yale Computer Society Catalyst sprint.
 
-Note Split reads text only. Upload `.txt` files or typed PDFs. If your source is handwritten, transcribe it first with a tool such as Gemini or your phone's notes app, save the text as a `.txt` file, and upload that. The app makes no vision calls, so you are not charged for reading images.
+Note Split reads text only. Upload `.txt` files or typed PDFs. If your source is handwritten, transcribe it first with a tool such as Gemini, save the text as a `.txt` file, and upload that. The app makes no vision calls, so reading images does not cost extra.
 
 ## What it makes
 
 - `note.md` — an Obsidian markdown note in the style of your example notes or a saved style. Math uses `$...$` inline and `$$...$$` for display.
 - `cards.apkg` — an Anki deck of the facts the card-creator judged must be recalled word for word. Math uses Anki's `\(...\)` and `\[...\]` delimiters in the deck.
+
+When your example notes use images or embeds repeatedly, the style brief records them, but the drafter can only leave a suggestion in the note; it cannot add the asset. The note can carry over Obsidian formatting from the example style, including color markup, callouts, links, and tags.
 
 A notes-only run downloads `note.md` and does not build a deck. A cards-only run downloads `cards.apkg` and does not write a note. A both run downloads both.
 
@@ -147,7 +149,7 @@ Both files are written with `0o600` permissions, so only your operating-system u
 
 Requests use `store=False`, so the Responses API does not keep the response for later retrieval. OpenAI's own retention and account policies still apply.
 
-Source files and example note files are not stored. A generated style brief can quote a few short lines from your examples, because the summarizer copies them. The last run stores the generated note, cards, deck bytes, brief, measured counts, token counts, and finish time, when those pieces exist.
+Source files and example note files are not stored. A generated style brief can quote a few short lines from your examples, because the summarizer uses them as style illustrations. The last run stores the generated note, cards, deck bytes, brief, measured counts, token counts, and finish time, when those pieces exist.
 
 ## Tips
 
