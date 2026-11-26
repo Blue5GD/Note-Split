@@ -197,13 +197,20 @@ def save_profile(
     if brief == "":
         raise ValueError("A style profile needs a brief.")
 
+    median = float(median_words)
+    longest = int(longest_words)
+    if median < 0 or longest < 0:
+        raise ValueError("Word counts cannot be negative.")
+    if median > 0 and longest > 0 and median > longest:
+        raise ValueError("Median words cannot be larger than longest words.")
+
     saved_at = _now()
     entries = dict(_profile_entries())
     entries[name] = {
         "brief": brief,
         "measured_text": measured_text,
-        "median_words": float(median_words),
-        "longest_words": int(longest_words),
+        "median_words": median,
+        "longest_words": longest,
         "saved_at": saved_at,
     }
     _write_json(PROFILES_FILE, {"version": VERSION, "profiles": entries})
@@ -211,8 +218,8 @@ def save_profile(
         name=name,
         brief=brief,
         measured_text=measured_text,
-        median_words=float(median_words),
-        longest_words=int(longest_words),
+        median_words=median,
+        longest_words=longest,
         saved_at=saved_at,
     )
 

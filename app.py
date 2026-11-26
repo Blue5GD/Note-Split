@@ -1,36 +1,25 @@
 """The one Streamlit page.
 
-Uploads stay on the page until the button is clicked. The pipeline, including
-the example-note check, starts only inside that click. A later click, such as
-a download, an expander, or a checkbox, reruns this script from the top and
-does not start the pipeline again.
+Two tabs split style setup from generation:
+- Generate: pick a saved style (when making a note), upload lecture
+  sources, choose study note / flashcards / both, add an optional
+  instruction, and run. Never calls the summarizer.
+- Styles: generate a saved style from example .md notes (1 summarizer
+  call, no source needed), add a style manually, or view, edit, and
+  delete saved styles.
 
-Two boxes choose a study note, flashcards, or both. Cards only does
-not read example notes or a saved style. A note run takes its style
-from uploaded example notes or a saved style. A saved style skips the
-summarizer, so one paid call is saved. A click with neither box checked
-is a local stop, like a missing file, and does not start a wait. Once a
-click gets past that check, the finish time is kept as epoch seconds in
-this browser tab and in the saved run. Another click is refused for 60
-seconds after the attempt ends. A restored run keeps that guard across
-a reload. The note under the button counts those seconds down on its
-own.
+Uploads stay on the page until a Run button is clicked. A later click,
+such as a download, an expander, or a checkbox, reruns this script from
+the top and does not call the model again.
 
-The stored result is written only after run_pipeline returns. A notes
-run has no card package. A failed later run does not replace the
-stored dict. The result also holds the token counts and the epoch
-finish time. When a note was written, it includes the style brief.
-The Style notes expander draws that brief. It is not a download.
+Once a paid attempt gets past the local upload check, the finish time
+is kept as epoch seconds in this browser tab and in the saved run.
+Another paid click on either tab is refused for 60 seconds after the
+attempt ends.
 
-The last finished run is saved on this computer. A reload restores it,
-marked as restored, so the note and cards are shown without credits
-being spent. Saved styles live there too, so a brief that was already
-paid for can be used again.
-
-Two or more .txt files, or two or more PDFs, can be dragged into the
-order they should be read. Streamlit reruns this file on every widget
-change and forgets a normal variable, so that order lives in
-st.session_state.
+The last finished generate run and all saved styles are stored on this
+computer. A reload restores the last generate result without spending
+credits.
 
 The page is text-only. A handwritten page is transcribed outside the
 app and uploaded as a .txt file, so the page makes no vision calls.
@@ -56,7 +45,7 @@ from models import (
     estimate_cost,
     format_cost,
 )
-from pipeline import check_example_notes, join_example_notes, run_pipeline
+from pipeline import join_example_notes, run_pipeline, run_summarizer
 from storage import (
     StyleProfile,
     clear_last_run,
@@ -72,15 +61,12 @@ from storage import (
 # the source files.
 SOURCE_ORDER_KEY = "source_order"
 
-# The two style choices. The saved path reuses a brief instead of
-# paying the summarizer to write a new one.
-UPLOAD_STYLE = "Upload example notes"
-SAVED_STYLE = "Saved style"
 STYLE_NOTICE_KEY = "style_notice"
+STYLE_USAGE_KEY = "style_usage"
 # Changing these makes Streamlit build fresh text widgets, which clears
 # the form after a successful save.
 STYLE_FORM_NONCE_KEY = "style_form_nonce"
-RUN_STYLE_FORM_NONCE_KEY = "run_style_form_nonce"
+GEN_STYLE_FORM_NONCE_KEY = "gen_style_form_nonce"
 
 # True only while Preview is showing the run restored from disk. A new
 # successful run clears it.
@@ -138,38 +124,23 @@ def _restore_last_run() -> None:
         st.session_state[RUN_FINISHED_KEY] = float(finished)
 
 
-def _reject_bad_upload(
-    examples,
+def _reject_bad_generate(
     sources,
     mode,
-    style_choice,
-    selected_profile,
+    selected_profile: StyleProfile | None,
 ) -> None:
-    """Stop if Run was clicked without a usable choice or upload.
+    """Stop if Generate was clicked without a usable choice or upload.
 
-    This runs before example notes are read and before the source is
-    read. It looks at the filenames, not their bytes. Several .txt files
-    are fine. Several PDFs are fine.
-
-    A notes run, or a run that makes both, still needs a style source.
-    The upload path needs at least one example note. The saved path
-    needs a real selected profile, with a non-blank brief. Cards only
-    ignores the style choice entirely. Neither box checked is the same
-    kind of stop as a missing file. It is raised here, outside the wait.
+    This runs before the source is read. A notes or both run needs a
+    saved style with a non-blank brief. Cards only ignores styles.
     """
     if mode not in ("both", "notes", "cards"):
         raise Stop("Choose a study note, flashcards, or both.")
     if mode != "cards":
-        if style_choice == SAVED_STYLE:
-            if selected_profile is None or selected_profile.brief.strip() == "":
-                raise Stop(
-                    'Choose a saved style, or add one under "Add a style summary".'
-                )
-        elif style_choice == UPLOAD_STYLE:
-            if not examples:
-                raise Stop("Upload at least one example note.")
-        else:
-            raise Stop("Choose where the note's style should come from.")
+        if selected_profile is None or selected_profile.brief.strip() == "":
+            raise Stop(
+                "Choose a saved style, or create one in the Styles tab first."
+            )
     if not sources:
         raise Stop("Upload a source: one or more .txt files or one or more PDFs.")
     if _mixes_pdf_and_txt(sources):
@@ -212,13 +183,9 @@ def _mixes_pdf_and_txt(sources) -> bool:
 def _source_text(sources) -> str:
     """Read the source files and return one string.
 
-    Call this only after check_example_notes has returned, or on a
-    saved-style or cards-only run that skips that check. Every .txt or
-    PDF goes in the same way. The list already follows the order chosen above the Run
-    button. This function does not sort.
+    Every .txt or PDF goes in the same way. The list already follows
+    the order chosen above the Run button. This function does not sort.
     """
-    # getvalue() returns the whole file on every Run. read() would leave
-    # the pointer at the end, so a second Run could see an empty file.
     pairs = []
     for source in sources:
         pairs.append((source.name, source.getvalue()))
@@ -393,9 +360,6 @@ def _show_order(files_in_default_order, state_key: str, drag_prefix: str, senten
     # Two files are the smallest list worth dragging. One file is
     # already in order, so it gets no widget.
     if len(default_labels) >= 2:
-        # Same sentence as before, in caption type, so the order list
-        # does not look like another heading. The fallback uses buttons,
-        # so do not tell the user to drag when the package is missing.
         if sort_items is None:
             st.caption(
                 ":material/swap_vert: Use Up and Down to order these files."
@@ -410,8 +374,6 @@ def _show_order(files_in_default_order, state_key: str, drag_prefix: str, senten
     order = _labels_this_run(
         st.session_state.get(state_key), default_labels, returned
     )
-    # Labels, not the file objects. The next rerun brings new objects
-    # for the same names. The bytes are read later, inside Run.
     st.session_state[state_key] = order
     return _files_for_labels(files_in_default_order, order)
 
@@ -440,221 +402,34 @@ def _preview_caption(mode: str, note, apkg_bytes, brief) -> str:
     return line
 
 
-def _saved_style_panel() -> StyleProfile | None:
-    """Draw the saved style controls and return the chosen profile.
-
-    This is called only when the radio chose "Saved style". No profiles
-    means None, and the run check stops before the source is read. The
-    add form is always here, so the first profile can be made without
-    a paid call. Delete needs a checked confirmation and then a click.
-    """
-    st.caption(
-        "Reuse a style summary that is already saved. The summarizer is skipped."
-    )
-    profiles = list_profiles()
-    selected = None
-    if profiles:
-        names = [profile.name for profile in profiles]
-        chosen = st.selectbox("Saved style", names)
-        selected = get_profile(chosen) if chosen is not None else None
-        if selected is not None:
-            with st.expander(
-                "View style summary",
-                expanded=False,
-                icon=":material/ink_pen:",
-            ):
-                st.markdown(selected.brief)
-                st.caption(
-                    "The summarizer is skipped when this style is used, so "
-                    "one paid model call is saved."
-                )
-            with st.expander(
-                "Edit style summary",
-                expanded=False,
-                icon=":material/edit:",
-            ):
-                current_words = (
-                    int(round(selected.median_words))
-                    if selected.median_words > 0
-                    else 0
-                )
-                with st.form(
-                    f"edit_style_profile:{selected.name}:{selected.saved_at}"
-                ):
-                    edited_brief = st.text_area(
-                        "Style summary",
-                        value=selected.brief,
-                        height=220,
-                        key=(
-                            f"edit_style_brief:"
-                            f"{selected.name}:{selected.saved_at}"
-                        ),
-                    )
-                    edited_words = st.number_input(
-                        "Typical words per note",
-                        min_value=0,
-                        step=50,
-                        value=current_words,
-                        help=(
-                            "Optional. Changing this updates the word-count "
-                            "target. Set to 0 for no word-count target."
-                        ),
-                        key=(
-                            f"edit_style_words:"
-                            f"{selected.name}:{selected.saved_at}"
-                        ),
-                    )
-                    save_edits = st.form_submit_button(
-                        "Save changes",
-                        icon=":material/save:",
-                    )
-                    if save_edits:
-                        try:
-                            target = (
-                                int(edited_words)
-                                if edited_words is not None
-                                and edited_words > 0
-                                else 0
-                            )
-                            if target == current_words:
-                                measured_text = selected.measured_text
-                                median_words = selected.median_words
-                                longest_words = selected.longest_words
-                            else:
-                                measured_text = ""
-                                median_words = float(target)
-                                longest_words = target
-                            saved = save_profile(
-                                selected.name,
-                                edited_brief,
-                                measured_text=measured_text,
-                                median_words=median_words,
-                                longest_words=longest_words,
-                            )
-                        except (ValueError, OSError) as error:
-                            st.error(f"Could not save the style: {error}")
-                        else:
-                            st.session_state[STYLE_NOTICE_KEY] = (
-                                f'Updated the style "{saved.name}".'
-                            )
-                            st.rerun()
-            with st.popover("Delete style", icon=":material/delete:"):
-                st.caption(f'Delete "{selected.name}" from this computer?')
-                confirmed = st.checkbox(
-                    "Confirm delete",
-                    key=(
-                        f"confirm_delete_style:"
-                        f"{selected.name}:{selected.saved_at}"
-                    ),
-                )
-                if st.button(
-                    "Delete style",
-                    icon=":material/delete:",
-                    disabled=not confirmed,
-                    key=f"delete_style:{selected.name}:{selected.saved_at}",
-                ):
-                    try:
-                        removed = delete_profile(selected.name)
-                    except OSError as error:
-                        st.error(f"Could not delete the style: {error}")
-                    else:
-                        if removed:
-                            st.session_state[STYLE_NOTICE_KEY] = (
-                                f'Deleted the style "{selected.name}".'
-                            )
-                            st.rerun()
-                        else:
-                            st.error("That style was already removed.")
-    else:
-        st.info(
-            "No saved styles yet. Add a summary below, then choose it here."
+def _word_count_caption(profile: StyleProfile) -> str:
+    """Short summary of a saved style's word-count targets."""
+    median = int(round(profile.median_words)) if profile.median_words > 0 else 0
+    longest = int(profile.longest_words) if profile.longest_words > 0 else 0
+    if median > 0 and longest > 0:
+        return (
+            f"Word-count targets: median {median:,} words · "
+            f"longest {longest:,} words (length retry triggers above "
+            f"1.5× median and longest)."
         )
+    if median > 0:
+        return f"Target median: {median:,} words (no length retry)."
+    return "No word-count targets set (length retry is skipped)."
 
-    nonce = st.session_state.get(STYLE_FORM_NONCE_KEY, 0)
-    with st.expander(
-        "Add a style summary",
-        expanded=False,
-        icon=":material/add:",
-    ):
-        st.caption(
-            "Saving a name that already exists replaces its summary and "
-            "word count. A count of 0 means no measurements."
+
+def _normalize_word_targets(median_input, longest_input) -> tuple[float, int]:
+    """Validate and normalize median and longest word-count inputs."""
+    median = int(median_input) if median_input is not None and median_input > 0 else 0
+    longest = int(longest_input) if longest_input is not None and longest_input > 0 else 0
+    if median > 0 and longest == 0:
+        longest = median
+    if median == 0 and longest > 0:
+        raise ValueError(
+            "Set a median word count too, or set both to 0 to disable word targets."
         )
-        with st.form("add_style_profile"):
-            name = st.text_input(
-                "Name",
-                placeholder="For example: Biology lecture notes",
-                key=f"new_style_name:{nonce}",
-            )
-            brief = st.text_area(
-                "Style summary",
-                height=160,
-                placeholder=(
-                    "Describe length, headings, math habits, and what the "
-                    "notes avoid."
-                ),
-                key=f"new_style_brief:{nonce}",
-            )
-            words = st.number_input(
-                "Typical words per note",
-                min_value=0,
-                step=50,
-                value=0,
-                help=(
-                    "Optional. Used as both the median and the longest "
-                    "target length."
-                ),
-                key=f"new_style_words:{nonce}",
-            )
-            submitted = st.form_submit_button(
-                "Save style",
-                icon=":material/save:",
-            )
-            if submitted:
-                try:
-                    target = (
-                        int(words) if words is not None and words > 0 else 0
-                    )
-                    saved = save_profile(
-                        name,
-                        brief,
-                        median_words=float(target),
-                        longest_words=target,
-                    )
-                except (ValueError, OSError) as error:
-                    st.error(f"Could not save the style: {error}")
-                else:
-                    st.session_state[STYLE_FORM_NONCE_KEY] = nonce + 1
-                    st.session_state[STYLE_NOTICE_KEY] = (
-                        f'Saved the style "{saved.name}".'
-                    )
-                    st.rerun()
-    return selected
-
-
-def _style_measured(measured) -> tuple[str, float, int]:
-    """The profile fields from a pipeline measured dict.
-
-    An older saved run may have no measured dict, or a hand-edited one
-    may have the wrong types. A missing or bad value becomes the same
-    empty value the profile store uses.
-    """
-    if not isinstance(measured, dict):
-        return "", 0.0, 0
-    text = measured.get("text")
-    if not isinstance(text, str):
-        text = ""
-    median_words = measured.get("median_words")
-    if isinstance(median_words, bool) or not isinstance(
-        median_words, (int, float)
-    ):
-        median_words = 0.0
-    longest_words = measured.get("longest_words")
-    if isinstance(longest_words, bool) or not isinstance(
-        longest_words, (int, float)
-    ):
-        longest_words = 0
-    return text, float(median_words), int(longest_words)
+    if median > longest:
+        raise ValueError("Median words cannot be larger than longest words.")
+    return float(median), longest
 
 
 def _token_count(count: int, noun: str) -> str:
@@ -664,16 +439,7 @@ def _token_count(count: int, noun: str) -> str:
 
 
 def _show_usage(usage_data, prefix: str = "") -> None:
-    """Draw the compact token and cost line for a finished run.
-
-    An older saved result has no usage key, so that line is left out.
-    A malformed dict is left out too. The dollar estimate appears only
-    when both price variables are set, because estimate_cost returns
-    None otherwise. The help text says how to turn it on.
-
-    prefix is for a failed attempt. It goes before the counts, so that
-    line is not mistaken for the last successful result.
-    """
+    """Draw the compact token and cost line for a finished run."""
     if not isinstance(usage_data, dict):
         return
     try:
@@ -700,74 +466,47 @@ def _show_usage(usage_data, prefix: str = "") -> None:
     st.caption(":material/payments: " + line, help=help_text)
 
 
-def _max_paid_calls(
-    mode, style_choice, length_retry: bool = True
-) -> int:
-    """The most paid calls the current mode and style can make.
+def _max_paid_calls(mode, length_retry: bool = True) -> int:
+    """The most paid calls a Generate run can make.
 
-    The counts include the one card retry and, when length_retry is
-    true, the one drafter length retry. A saved style skips the
-    summarizer, so its count is one lower. A saved style with no
-    measurements cannot make the length retry, so pass False for it.
-    No model call is made to work this out.
+    Generate always uses a saved style for notes, so the summarizer
+    never runs here.
     """
     if mode == "cards":
         return 2
     if mode == "notes":
-        if style_choice == SAVED_STYLE:
-            return 2 if length_retry else 1
-        return 3
+        return 2 if length_retry else 1
     if mode == "both":
-        if style_choice == SAVED_STYLE:
-            return 4 if length_retry else 3
-        return 5
+        return 4 if length_retry else 3
     return 0
 
 
-def _max_calls_help(
-    mode, style_choice, length_retry: bool = True
-) -> str:
-    """The breakdown behind the maximum call caption."""
+def _max_calls_help(mode, length_retry: bool = True) -> str:
+    """The breakdown behind the maximum call caption on Generate."""
     if mode == "cards":
-        text = "Cards only: one card call and one retry."
-    elif mode == "notes":
-        if style_choice == SAVED_STYLE:
-            if length_retry:
-                text = (
-                    "Saved style: one drafter call and one length retry. "
-                    "The summarizer is skipped."
-                )
-            else:
-                text = (
-                    "Saved style with no typical word count: one drafter "
-                    "call. The summarizer and the length retry are skipped."
-                )
-        else:
-            text = (
-                "Example notes: one summarizer call, one drafter call, "
-                "and one length retry."
+        return "Cards only: one card call and one retry."
+    if mode == "notes":
+        if length_retry:
+            return (
+                "Study note: one drafter call and one length retry. "
+                "The summarizer is skipped because a saved style is used."
             )
-    elif mode == "both":
-        if style_choice == SAVED_STYLE:
-            if length_retry:
-                text = (
-                    "Saved style: one drafter call, one length retry, one "
-                    "card call, and one card retry. The summarizer is skipped."
-                )
-            else:
-                text = (
-                    "Saved style with no typical word count: one drafter "
-                    "call, one card call, and one card retry. The "
-                    "summarizer and the length retry are skipped."
-                )
-        else:
-            text = (
-                "Example notes: one summarizer call, one drafter call, "
-                "one length retry, one card call, and one card retry."
+        return (
+            "Study note with no word-count targets: one drafter call. "
+            "The summarizer and length retry are skipped."
+        )
+    if mode == "both":
+        if length_retry:
+            return (
+                "Note and cards: one drafter call, one length retry, one "
+                "card call, and one card retry. The summarizer is skipped."
             )
-    else:
-        return "No mode is selected, so Run stops before any model call."
-    return text
+        return (
+            "Note and cards with no word-count targets: one drafter call, "
+            "one card call, and one card retry. The summarizer and length "
+            "retry are skipped."
+        )
+    return "No mode is selected, so Run stops before any model call."
 
 
 # set_page_config has to be the first Streamlit call. "centered" keeps
@@ -783,17 +522,15 @@ st.set_page_config(
 # any widget is drawn, so Preview and the wait key both see it.
 _restore_last_run()
 
+
 # Redraws only the wait note, once a second. run_every=1 means one
-# second. The uploaders, the button, and the pipeline stay outside
-# this function, so a tick cannot start a run.
+# second. The uploaders, buttons, and pipeline stay outside this
+# function, so a tick cannot start a run.
 @st.fragment(run_every=1)
 def _show_cooldown() -> None:
-    """The wait note under the button."""
+    """The wait note shown while the 60-second cooldown is active."""
     left = _seconds_left()
     if left <= 0:
-        # The minute is over. One full rerun leaves this note
-        # unregistered, so it does not keep ticking. That rerun is
-        # not a button click, so the model is not called.
         st.rerun()
     if left == 1:
         amount = "1 second"
@@ -806,450 +543,577 @@ def _show_cooldown() -> None:
         )
 
 
-# The title and the boxes below are layout only. Choosing a file,
-# dragging, checking a box, or opening a section reruns this script
-# and does not call the model. That call stays inside the button.
 st.title("Note Split", icon=":material/menu_book:")
 st.markdown(
-    "Upload one lecture or a few pages of text. Add example notes or a saved "
-    "style when you want a study note. The note is for understanding, and "
-    "the cards are only the facts you need word for word."
+    "Create or edit a saved style in **Styles**, then turn lectures into "
+    "Obsidian study notes and Anki recall cards in **Generate**."
 )
 
-# Save and delete style actions live in different parts of the page.
-# Show their notice in one place that is drawn for every mode, so a
-# style saved from a restored preview is not silently swallowed when
-# the checkboxes are on cards only.
 style_notice = st.session_state.pop(STYLE_NOTICE_KEY, None)
 if style_notice:
     st.caption(":material/check_circle: " + style_notice)
+style_usage = st.session_state.pop(STYLE_USAGE_KEY, None)
+if style_usage:
+    _show_usage(style_usage)
 
-# These two boxes only pick the mode. A narrow window stacks the
-# columns. A wide window keeps them side by side. Unchecking one
-# reruns the page and does not call the model.
-with st.container(border=True):
-    st.subheader("1. What to make", icon=":material/checklist:")
-    note_col, card_col = st.columns(2, gap="medium")
-    with note_col:
-        # The icon is the heading, same as the source section heading.
-        # The checkbox label is the choice itself, so the words are
-        # not written twice.
-        make_note = st.checkbox(
-            ":material/article: **Study note**",
-            value=True,
-            key="make_note",
-        )
-        st.caption(
-            "The study note copies the length and habits of example notes "
-            "or a saved style. Unchecking it skips that work."
-        )
-    with card_col:
-        make_cards = st.checkbox(
-            ":material/style: **Flashcards**",
-            value=True,
-            key="make_cards",
-        )
-        st.caption(
-            "Flashcards are only the word-for-word facts. "
-            "Cards only does not read example notes or saved styles. "
-            "It only reads the source."
-        )
-
-with st.container(border=True):
-    st.subheader("2. Style source", icon=":material/palette:")
-    # Cards only must not create the uploader or read a profile. A later
-    # read of that widget would open the files. examples is an empty list
-    # instead, so the click below has nothing to decode.
-    if make_cards and not make_note:
-        examples = []
-        style_choice = None
-        selected_profile = None
-        with st.container(border=True):
-            st.markdown(
-                "This run only reads the source. Example notes and saved "
-                "styles are not used and are not sent to the model."
-            )
-    else:
-        style_choice = st.radio(
-            "Choose a style source",
-            [UPLOAD_STYLE, SAVED_STYLE],
-            horizontal=True,
-            key="style_choice",
-        )
-        if style_choice == SAVED_STYLE:
-            examples = []
-            selected_profile = _saved_style_panel()
-        else:
-            selected_profile = None
-            st.caption(
-                "One or more Obsidian markdown files. These set the length "
-                "and the habits of the new note."
-            )
-            examples = st.file_uploader(
-                "Example markdown notes",
-                type=["md"],
-                accept_multiple_files=True,
-                help="At least one .md file.",
-            )
-
-with st.container(border=True):
-    st.subheader("3. Source", icon=":material/upload_file:")
-    st.caption(
-        "Text only: several .txt files, or several typed PDFs. Do not mix "
-        "the two. Handwritten pages must be transcribed and saved as .txt "
-        "first."
-    )
-    sources = st.file_uploader(
-        "Source files",
-        type=["txt", "pdf"],
-        accept_multiple_files=True,
-        help="Several .txt files, or several PDFs. Not a PDF mixed with a .txt.",
-    )
-    # Under the uploader, on every rerun, so the button sees this run's order.
-    sources_to_read = _show_order(
-        _sources_in_upload_order(sources),
-        SOURCE_ORDER_KEY,
-        "source_drag",
-        "Drag files into the order they should be read.",
-    )
-
-with st.container(border=True):
-    st.subheader("4. Instruction", icon=":material/edit_note:")
-    st.caption(
-        "Optional. Empty is fine. Use this when the new note should differ "
-        "from the style source."
-    )
-    instruction = st.text_area(
-        "Optional instruction",
-        placeholder="For example: keep it shorter than the examples, or focus on the last section.",
-        height=120,
-    )
-
-# The boxes map to the pipeline's mode string. Neither box is not a
-# mode. That click is stopped with the missing-file check, before the
-# wait. A run that includes a note uses the book icon. Cards only uses
-# the card icon.
-if make_note and make_cards:
-    run_mode = "both"
-    button_label = "Make the note and cards"
-    button_icon = ":material/auto_stories:"
-    spinner_text = "Writing the note and the cards."
-elif make_note:
-    run_mode = "notes"
-    button_label = "Make the note"
-    button_icon = ":material/auto_stories:"
-    spinner_text = "Writing the note."
-elif make_cards:
-    run_mode = "cards"
-    button_label = "Make the cards"
-    button_icon = ":material/style:"
-    spinner_text = "Writing the cards."
-else:
-    run_mode = None
-    button_label = "Make the note and cards"
-    button_icon = ":material/auto_stories:"
-    spinner_text = "Writing the note and the cards."
-
-# The caption above the button is a spend guard, not an estimate from
-# the API. The counts include the card retry and the drafter length
-# retry, so they are maximums. A saved style with no measurements
-# cannot make the length retry, so its maximum is one lower.
-if run_mode is not None:
-    saved_has_target = (
-        selected_profile is not None
-        and float(selected_profile.median_words or 0.0) > 0
-        and int(selected_profile.longest_words or 0) > 0
-    )
-    # No saved profile means Run stops before any call, so do not claim
-    # a length retry either.
-    length_retry = style_choice != SAVED_STYLE or (
-        selected_profile is not None and saved_has_target
-    )
-    max_calls = _max_paid_calls(
-        run_mode,
-        style_choice,
-        length_retry=length_retry,
-    )
-    call_word = "call" if max_calls == 1 else "calls"
-    st.caption(
-        f":material/payments: Up to {max_calls} paid model {call_word} for this run.",
-        help=_max_calls_help(
-            run_mode,
-            style_choice,
-            length_retry=length_retry,
-        ),
-    )
-
-# The button stays clickable during the wait. A disabled button does
-# not rerun the page by itself, so the wait would never end. The click
-# is refused in code while seconds are left.
-if st.button(
-    button_label,
-    type="primary",
-    icon=button_icon,
-    width="stretch",
-):
-    # A click during the wait must not read the notes or call the model.
-    # The note under the button says how many seconds are left.
-    if _seconds_left() == 0:
-        # One collector for the whole attempt. If a later call fails,
-        # this still holds the counts for the calls that were paid for.
-        usage = TokenUsage()
-        # Set only after the pipeline returns. The saved result and the
-        # in-session wait then share one finish time.
-        finished_at = None
-        try:
-            _reject_bad_upload(
-                examples,
-                sources,
-                run_mode,
-                style_choice,
-                selected_profile,
-            )
-            # Past the upload check, this attempt may call the model.
-            # finally records the finish time on every way out, so the
-            # wait does not depend on a crash. A missing file, or neither
-            # box checked, never reaches this try, so it does not start
-            # the wait.
-            try:
-                # The pipeline adds one entry per model call to the
-                # collector above.
-                with st.spinner(spinner_text):
-                    if run_mode == "cards":
-                        # Skip _example_text on this branch. A normal read
-                        # would still open those files, because getvalue()
-                        # reads each upload. Cards only must not open them,
-                        # and it must not call check_example_notes. The
-                        # empty string and None are placeholders. The
-                        # pipeline does not read example notes in this mode.
-                        source = _source_text(sources_to_read)
-                        result = run_pipeline(
-                            "",
-                            source,
-                            instruction,
-                            None,
-                            mode="cards",
-                            usage=usage,
-                        )
-                    elif style_choice == SAVED_STYLE:
-                        # A saved profile already has its brief and its
-                        # measurements. Do not read the example uploads,
-                        # and do not call check_example_notes. The saved
-                        # style replaces the summarizer, so no paid call
-                        # is spent writing a new brief.
-                        source = _source_text(sources_to_read)
-                        result = run_pipeline(
-                            "",
-                            source,
-                            instruction,
-                            None,
-                            mode=run_mode,
-                            usage=usage,
-                            style_brief=selected_profile.brief,
-                            style_measured_text=selected_profile.measured_text,
-                            style_median_words=selected_profile.median_words,
-                            style_longest_words=selected_profile.longest_words,
-                        )
-                    else:
-                        example_files, example_notes = _example_text(examples)
-                        # Before the source is read.
-                        check_example_notes(example_notes)
-                        # The list above is already in the dragged order.
-                        source = _source_text(sources_to_read)
-                        # run_pipeline returns when the note is done. A both
-                        # run also waits for the .apkg bytes. This local
-                        # dict is the first time a result is stored.
-                        # example_files is each upload, measured before the notes are joined.
-                        # run_mode is "notes" or "both" in this branch.
-                        result = run_pipeline(
-                            example_notes,
-                            source,
-                            instruction,
-                            example_files,
-                            mode=run_mode,
-                            usage=usage,
-                        )
-
-                    # The run succeeded. Replacing the stored result only
-                    # here keeps a failed later run from clearing Preview.
-                    result["usage"] = usage.as_dict()
-                    # Epoch seconds, so a reload can restore this exact
-                    # wait along with the result. The wait below uses the
-                    # same value, so a reload does not shorten it. Set
-                    # this before the dict becomes the stored result.
-                    finished_at = time.time()
-                    result["finished_at_epoch"] = finished_at
-                    st.session_state["result"] = result
-                    st.session_state.pop(RESTORED_KEY, None)
-                    try:
-                        save_last_run(result)
-                    except (OSError, TypeError) as error:
-                        # The on-screen result stays usable. Only a reload
-                        # loses it, so this is a warning, not a stop.
-                        st.warning(
-                            "The result is on this page, but it could not be "
-                            f"saved for a reload: {error}"
-                        )
-            finally:
-                # A normal variable is forgotten on every rerun. Streamlit
-                # starts this file over from the top on a click, so the
-                # finish time has to live in st.session_state. That dict
-                # stays with this browser tab, and the same epoch value is
-                # saved with the result for a reload.
-                #
-                # The wait starts here, after the attempt, not at the click.
-                # Clicks during the spinner are handled only on the next
-                # rerun, once this file has returned. Those queued clicks
-                # still need a full minute, or they would start a second paid run.
-                st.session_state[RUN_FINISHED_KEY] = (
-                    finished_at if finished_at is not None else time.time()
-                )
-        except Stop as error:
-            st.error(str(error))
-            # Calls made before the stop were still paid for. Show them
-            # without replacing the last successful result.
-            _show_usage(usage.as_dict(), prefix="This attempt used ")
-        except ProviderError as error:
-            st.error(str(error))
-            _show_usage(usage.as_dict(), prefix="This attempt used ")
-
-# Only while a wait is stored. An idle page does not register the
-# once-a-second note, so opening the app does not keep rerunning.
+# Only while a wait is stored. Shown above the tabs so it applies to
+# both Generate and Styles runs.
 if _seconds_left() > 0:
     _show_cooldown()
 
-# A download or an expander reruns this file. The block above is skipped
-# on that rerun. The previous result stays until a later click finishes.
-if "result" in st.session_state:
-    result = st.session_state["result"]
-    # A result saved before modes existed has no "mode" key. That run
-    # made a note and cards, so a missing mode counts as "both". A
-    # section is still skipped when its value is missing: no note
-    # download for cards only, no deck download for a note only.
-    mode = result.get("mode", "both")
-    note = result.get("note")
-    cards = result.get("cards")
-    brief = result.get("brief")
-    apkg_bytes = result.get("apkg_bytes")
-    st.header("Preview", icon=":material/visibility:")
-    st.caption(_preview_caption(mode, note, apkg_bytes, brief))
-    if st.session_state.get(RESTORED_KEY):
-        st.caption(
-            ":material/history: Restored from the last run on this computer. "
-            "No credits were spent."
-        )
-    # A compact line, not a metrics row. An older saved result has no
-    # usage key, so _show_usage draws nothing for it.
-    _show_usage(result.get("usage"))
-    # A horizontal container keeps the downloads on one row. A missing
-    # file is left out, so the caption does not promise it either.
-    if note is not None or apkg_bytes is not None:
-        with st.container(horizontal=True, gap="small"):
-            if note is not None:
-                st.download_button(
-                    "Download note.md",
-                    data=note,
-                    file_name="note.md",
-                    mime="text/markdown",
-                    key="download_note",
-                    icon=":material/download:",
+profiles = list_profiles()
+
+generate_tab, styles_tab = st.tabs(
+    [":material/auto_stories: Generate", ":material/palette: Styles"]
+)
+
+with generate_tab:
+    with st.container(border=True):
+        st.subheader("1. What to make", icon=":material/checklist:")
+        note_col, card_col = st.columns(2, gap="medium")
+        with note_col:
+            make_note = st.checkbox(
+                ":material/article: **Study note**",
+                value=True,
+                key="make_note",
+            )
+            st.caption(
+                "The study note follows a saved style. Unchecking it skips "
+                "writing a note."
+            )
+        with card_col:
+            make_cards = st.checkbox(
+                ":material/style: **Flashcards**",
+                value=True,
+                key="make_cards",
+            )
+            st.caption(
+                "Flashcards are only the word-for-word facts. "
+                "Cards only does not use a saved style. It only reads the source."
+            )
+
+    with st.container(border=True):
+        st.subheader("2. Saved style", icon=":material/palette:")
+        if make_cards and not make_note:
+            selected_profile = None
+            with st.container(border=True):
+                st.markdown(
+                    "This run only reads the source. Saved styles are not "
+                    "used and are not sent to the model."
                 )
-            if apkg_bytes is not None:
-                st.download_button(
-                    "Download cards.apkg",
-                    data=apkg_bytes,
-                    file_name="cards.apkg",
-                    mime="application/octet-stream",
-                    key="download_apkg",
-                    icon=":material/download:",
-                )
-    # One saved dict supplies both the preview and the reload. Clearing
-    # it removes only this local copy; downloads already taken stay.
-    # The confirmation key includes this run's finish time, so a new
-    # result starts with an unchecked box.
-    clear_stamp = result.get("finished_at_epoch", "older")
-    with st.popover("Clear saved result", icon=":material/delete_sweep:"):
+        elif profiles:
+            names = [profile.name for profile in profiles]
+            chosen = st.selectbox(
+                "Saved style",
+                names,
+                key="generate_style_select",
+            )
+            selected_profile = get_profile(chosen) if chosen is not None else None
+            if selected_profile is not None:
+                st.caption(_word_count_caption(selected_profile))
+                with st.expander(
+                    "View style summary",
+                    expanded=False,
+                    icon=":material/ink_pen:",
+                ):
+                    st.markdown(selected_profile.brief)
+                    st.caption(
+                        "Want to tweak this style or its word counts? Edit it "
+                        "in the **Styles** tab."
+                    )
+        else:
+            selected_profile = None
+            st.info(
+                "No saved styles yet. Open the **Styles** tab to generate a "
+                "style from example notes or add one manually."
+            )
+
+    with st.container(border=True):
+        st.subheader("3. Source", icon=":material/upload_file:")
         st.caption(
-            "This removes the result from this page and the saved copy on "
-            "this computer. Files you already downloaded are not affected."
+            "Text only: several .txt files, or several typed PDFs. Do not mix "
+            "the two. Handwritten pages must be transcribed and saved as .txt "
+            "first."
         )
-        confirmed = st.checkbox(
-            "Confirm clear",
-            key=f"confirm_clear_saved_result:{clear_stamp}",
+        sources = st.file_uploader(
+            "Source files",
+            type=["txt", "pdf"],
+            accept_multiple_files=True,
+            help="Several .txt files, or several PDFs. Not a PDF mixed with a .txt.",
+        )
+        sources_to_read = _show_order(
+            _sources_in_upload_order(sources),
+            SOURCE_ORDER_KEY,
+            "source_drag",
+            "Drag files into the order they should be read.",
+        )
+
+    with st.container(border=True):
+        st.subheader("4. Instruction", icon=":material/edit_note:")
+        st.caption(
+            "Optional. Empty is fine. Sent to the drafter and card-creator "
+            "for lecture-specific requests."
+        )
+        instruction = st.text_area(
+            "Optional instruction",
+            placeholder="For example: focus on the last section, or make sure the note covers every homework problem.",
+            height=120,
+        )
+
+    if make_note and make_cards:
+        run_mode = "both"
+        button_label = "Make the note and cards"
+        button_icon = ":material/auto_stories:"
+        spinner_text = "Writing the note and the cards."
+    elif make_note:
+        run_mode = "notes"
+        button_label = "Make the note"
+        button_icon = ":material/auto_stories:"
+        spinner_text = "Writing the note."
+    elif make_cards:
+        run_mode = "cards"
+        button_label = "Make the cards"
+        button_icon = ":material/style:"
+        spinner_text = "Writing the cards."
+    else:
+        run_mode = None
+        button_label = "Make the note and cards"
+        button_icon = ":material/auto_stories:"
+        spinner_text = "Writing the note and the cards."
+
+    if run_mode is not None:
+        saved_has_target = (
+            selected_profile is not None
+            and float(selected_profile.median_words or 0.0) > 0
+            and int(selected_profile.longest_words or 0) > 0
+        )
+        length_retry = run_mode != "cards" and saved_has_target
+        max_calls = _max_paid_calls(run_mode, length_retry=length_retry)
+        call_word = "call" if max_calls == 1 else "calls"
+        st.caption(
+            f":material/payments: Up to {max_calls} paid model {call_word} for this run.",
+            help=_max_calls_help(run_mode, length_retry=length_retry),
+        )
+
+    if st.button(
+        button_label,
+        type="primary",
+        icon=button_icon,
+        width="stretch",
+        key="run_generate",
+    ):
+        if _seconds_left() == 0:
+            usage = TokenUsage()
+            finished_at = None
+            try:
+                _reject_bad_generate(sources, run_mode, selected_profile)
+                try:
+                    with st.spinner(spinner_text):
+                        source = _source_text(sources_to_read)
+                        if run_mode == "cards":
+                            result = run_pipeline(
+                                "",
+                                source,
+                                instruction,
+                                None,
+                                mode="cards",
+                                usage=usage,
+                            )
+                        else:
+                            result = run_pipeline(
+                                "",
+                                source,
+                                instruction,
+                                None,
+                                mode=run_mode,
+                                usage=usage,
+                                style_brief=selected_profile.brief,
+                                style_measured_text=selected_profile.measured_text,
+                                style_median_words=selected_profile.median_words,
+                                style_longest_words=selected_profile.longest_words,
+                            )
+
+                        result["usage"] = usage.as_dict()
+                        finished_at = time.time()
+                        result["finished_at_epoch"] = finished_at
+                        st.session_state["result"] = result
+                        st.session_state.pop(RESTORED_KEY, None)
+                        try:
+                            save_last_run(result)
+                        except (OSError, TypeError) as error:
+                            st.warning(
+                                "The result is on this page, but it could not be "
+                                f"saved for a reload: {error}"
+                            )
+                finally:
+                    st.session_state[RUN_FINISHED_KEY] = (
+                        finished_at if finished_at is not None else time.time()
+                    )
+            except Stop as error:
+                st.error(str(error))
+                _show_usage(usage.as_dict(), prefix="This attempt used ")
+            except ProviderError as error:
+                st.error(str(error))
+                _show_usage(usage.as_dict(), prefix="This attempt used ")
+
+    if "result" in st.session_state:
+        result = st.session_state["result"]
+        mode = result.get("mode", "both")
+        note = result.get("note")
+        cards = result.get("cards")
+        brief = result.get("brief")
+        apkg_bytes = result.get("apkg_bytes")
+        st.header("Preview", icon=":material/visibility:")
+        st.caption(_preview_caption(mode, note, apkg_bytes, brief))
+        if st.session_state.get(RESTORED_KEY):
+            st.caption(
+                ":material/history: Restored from the last run on this computer. "
+                "No credits were spent."
+            )
+        _show_usage(result.get("usage"))
+        if note is not None or apkg_bytes is not None:
+            with st.container(horizontal=True, gap="small"):
+                if note is not None:
+                    st.download_button(
+                        "Download note.md",
+                        data=note,
+                        file_name="note.md",
+                        mime="text/markdown",
+                        key="download_note",
+                        icon=":material/download:",
+                    )
+                if apkg_bytes is not None:
+                    st.download_button(
+                        "Download cards.apkg",
+                        data=apkg_bytes,
+                        file_name="cards.apkg",
+                        mime="application/octet-stream",
+                        key="download_apkg",
+                        icon=":material/download:",
+                    )
+        clear_stamp = result.get("finished_at_epoch", "older")
+        with st.popover("Clear saved result", icon=":material/delete_sweep:"):
+            st.caption(
+                "This removes the result from this page and the saved copy on "
+                "this computer. Files you already downloaded are not affected."
+            )
+            confirmed = st.checkbox(
+                "Confirm clear",
+                key=f"confirm_clear_saved_result:{clear_stamp}",
+            )
+            if st.button(
+                "Clear saved result",
+                icon=":material/delete:",
+                disabled=not confirmed,
+                key=f"clear_saved_result:{clear_stamp}",
+            ):
+                try:
+                    clear_last_run()
+                except OSError as error:
+                    st.error(f"Could not remove the saved result: {error}")
+                else:
+                    st.session_state.pop("result", None)
+                    st.session_state.pop(RESTORED_KEY, None)
+                    st.rerun()
+        if note is not None:
+            with st.expander("Note", expanded=True, icon=":material/article:"):
+                st.markdown(note)
+        if cards is not None:
+            with st.expander("Cards", expanded=True, icon=":material/style:"):
+                if not cards:
+                    st.caption(
+                        "No cards were returned. The deck download is empty."
+                    )
+                for index, card in enumerate(cards):
+                    if index > 0:
+                        st.divider()
+                    st.markdown(card["front"])
+                    st.markdown(card["back"])
+        if brief is not None and brief != "":
+            with st.expander("Style notes", expanded=False, icon=":material/ink_pen:"):
+                st.markdown(brief)
+
+with styles_tab:
+    with st.container(border=True):
+        st.subheader("Generate a style from example notes", icon=":material/auto_awesome:")
+        st.caption(
+            "Runs only the summarizer on your example Obsidian notes and saves "
+            "the result. You can edit the summary and word counts right after."
+        )
+        gen_nonce = st.session_state.get(GEN_STYLE_FORM_NONCE_KEY, 0)
+        gen_style_name = st.text_input(
+            "Style name",
+            placeholder="For example: Multivariable calculus notes",
+            key=f"gen_style_name:{gen_nonce}",
+        )
+        gen_examples = st.file_uploader(
+            "Example markdown notes",
+            type=["md"],
+            accept_multiple_files=True,
+            help="Upload one or more .md files that already look the way you want.",
+            key=f"gen_style_examples:{gen_nonce}",
+        )
+        st.caption(
+            ":material/payments: 1 paid model call to summarize these example notes. "
+            "Saving a name that already exists replaces it."
         )
         if st.button(
-            "Clear saved result",
-            icon=":material/delete:",
-            disabled=not confirmed,
-            key=f"clear_saved_result:{clear_stamp}",
+            "Generate and save style",
+            type="primary",
+            icon=":material/auto_awesome:",
+            width="stretch",
+            key="run_summarizer",
         ):
-            try:
-                clear_last_run()
-            except OSError as error:
-                st.error(f"Could not remove the saved result: {error}")
-            else:
-                st.session_state.pop("result", None)
-                st.session_state.pop(RESTORED_KEY, None)
-                st.rerun()
-    if note is not None:
-        with st.expander("Note", expanded=True, icon=":material/article:"):
-            st.markdown(note)
-    if cards is not None:
-        with st.expander("Cards", expanded=True, icon=":material/style:"):
-            if not cards:
-                st.caption(
-                    "No cards were returned. The deck download is empty."
-                )
-            for index, card in enumerate(cards):
-                if index > 0:
-                    st.divider()
-                st.markdown(card["front"])
-                st.markdown(card["back"])
-    if brief is not None and brief != "":
-        with st.expander("Style notes", expanded=False, icon=":material/ink_pen:"):
-            st.markdown(brief)
-    # Cards only never measured a style, so this save control is hidden
-    # on that path. A restored note run can still save its style.
-    if mode != "cards" and brief is not None and brief != "":
-        measured_text, median_words, longest_words = _style_measured(
-            result.get("measured")
-        )
+            if _seconds_left() == 0:
+                usage = TokenUsage()
+                finished_at = None
+                try:
+                    if gen_style_name.strip() == "":
+                        raise Stop("Enter a name for this style first.")
+                    if not gen_examples:
+                        raise Stop("Upload at least one example .md note.")
+                    try:
+                        with st.spinner("Summarizing your example notes."):
+                            example_files, example_notes = _example_text(gen_examples)
+                            summary = run_summarizer(
+                                example_notes,
+                                example_files,
+                                usage=usage,
+                            )
+                            measured = summary["measured"]
+                            saved = save_profile(
+                                gen_style_name,
+                                summary["brief"],
+                                measured_text=measured["text"],
+                                median_words=measured["median_words"],
+                                longest_words=measured["longest_words"],
+                            )
+                            finished_at = time.time()
+                    finally:
+                        st.session_state[RUN_FINISHED_KEY] = (
+                            finished_at if finished_at is not None else time.time()
+                        )
+                except (Stop, ValueError, OSError) as error:
+                    st.error(str(error))
+                    _show_usage(usage.as_dict(), prefix="This attempt used ")
+                except ProviderError as error:
+                    st.error(str(error))
+                    _show_usage(usage.as_dict(), prefix="This attempt used ")
+                else:
+                    st.session_state[GEN_STYLE_FORM_NONCE_KEY] = gen_nonce + 1
+                    st.session_state[STYLE_NOTICE_KEY] = (
+                        f'Generated and saved the style "{saved.name}".'
+                    )
+                    st.session_state[STYLE_USAGE_KEY] = usage.as_dict()
+                    st.rerun()
+
+    with st.container(border=True):
+        st.subheader("Saved styles", icon=":material/bookmarks:")
+        if profiles:
+            names = [profile.name for profile in profiles]
+            chosen_manage = st.selectbox(
+                "Saved style",
+                names,
+                key="manage_style_select",
+            )
+            selected_manage = (
+                get_profile(chosen_manage) if chosen_manage is not None else None
+            )
+            if selected_manage is not None:
+                st.caption(_word_count_caption(selected_manage))
+                with st.expander(
+                    "View style summary",
+                    expanded=False,
+                    icon=":material/ink_pen:",
+                ):
+                    st.markdown(selected_manage.brief)
+                with st.expander(
+                    "Edit style summary",
+                    expanded=False,
+                    icon=":material/edit:",
+                ):
+                    current_median = (
+                        int(round(selected_manage.median_words))
+                        if selected_manage.median_words > 0
+                        else 0
+                    )
+                    current_longest = (
+                        int(selected_manage.longest_words)
+                        if selected_manage.longest_words > 0
+                        else 0
+                    )
+                    with st.form(
+                        f"edit_style_profile:{selected_manage.name}:{selected_manage.saved_at}"
+                    ):
+                        edited_brief = st.text_area(
+                            "Style summary",
+                            value=selected_manage.brief,
+                            height=220,
+                            key=(
+                                f"edit_style_brief:"
+                                f"{selected_manage.name}:{selected_manage.saved_at}"
+                            ),
+                        )
+                        med_col, long_col = st.columns(2, gap="medium")
+                        with med_col:
+                            edited_median = st.number_input(
+                                "Median words",
+                                min_value=0,
+                                step=50,
+                                value=current_median,
+                                help="Target length for the drafter. Set both to 0 to disable the length retry.",
+                                key=(
+                                    f"edit_style_median:"
+                                    f"{selected_manage.name}:{selected_manage.saved_at}"
+                                ),
+                            )
+                        with long_col:
+                            edited_longest = st.number_input(
+                                "Longest words",
+                                min_value=0,
+                                step=50,
+                                value=current_longest,
+                                help="Must be at least Median words. Length retry triggers above both 1.5× median and longest.",
+                                key=(
+                                    f"edit_style_longest:"
+                                    f"{selected_manage.name}:{selected_manage.saved_at}"
+                                ),
+                            )
+                        save_edits = st.form_submit_button(
+                            "Save changes",
+                            icon=":material/save:",
+                        )
+                        if save_edits:
+                            try:
+                                median_val, longest_val = _normalize_word_targets(
+                                    edited_median, edited_longest
+                                )
+                                if (
+                                    int(round(median_val)) == current_median
+                                    and longest_val == current_longest
+                                ):
+                                    measured_text = selected_manage.measured_text
+                                    median_words = selected_manage.median_words
+                                    longest_words = selected_manage.longest_words
+                                else:
+                                    measured_text = ""
+                                    median_words = median_val
+                                    longest_words = longest_val
+                                saved = save_profile(
+                                    selected_manage.name,
+                                    edited_brief,
+                                    measured_text=measured_text,
+                                    median_words=median_words,
+                                    longest_words=longest_words,
+                                )
+                            except (ValueError, OSError) as error:
+                                st.error(f"Could not save the style: {error}")
+                            else:
+                                st.session_state[STYLE_NOTICE_KEY] = (
+                                    f'Updated the style "{saved.name}".'
+                                )
+                                st.rerun()
+                with st.popover("Delete style", icon=":material/delete:"):
+                    st.caption(
+                        f'Delete "{selected_manage.name}" from this computer?'
+                    )
+                    confirmed = st.checkbox(
+                        "Confirm delete",
+                        key=(
+                            f"confirm_delete_style:"
+                            f"{selected_manage.name}:{selected_manage.saved_at}"
+                        ),
+                    )
+                    if st.button(
+                        "Delete style",
+                        icon=":material/delete:",
+                        disabled=not confirmed,
+                        key=(
+                            f"delete_style:"
+                            f"{selected_manage.name}:{selected_manage.saved_at}"
+                        ),
+                    ):
+                        try:
+                            removed = delete_profile(selected_manage.name)
+                        except OSError as error:
+                            st.error(f"Could not delete the style: {error}")
+                        else:
+                            if removed:
+                                st.session_state[STYLE_NOTICE_KEY] = (
+                                    f'Deleted the style "{selected_manage.name}".'
+                                )
+                                st.rerun()
+                            else:
+                                st.error("That style was already removed.")
+        else:
+            st.info(
+                "No saved styles yet. Generate one from example notes above, "
+                "or add one manually below."
+            )
+
+        nonce = st.session_state.get(STYLE_FORM_NONCE_KEY, 0)
         with st.expander(
-            "Save this style for later",
+            "Add a style manually",
             expanded=False,
-            icon=":material/bookmark_add:",
+            icon=":material/add:",
         ):
             st.caption(
-                "Save this run's style brief and measured word counts under "
-                "a name. Saving a name that already exists replaces it and "
-                "its word count."
+                "Saving a name that already exists replaces its summary and "
+                "word counts. Set both word counts to 0 for no length retry."
             )
-            run_nonce = st.session_state.get(RUN_STYLE_FORM_NONCE_KEY, 0)
-            with st.form("save_run_style"):
+            with st.form("add_style_profile"):
                 name = st.text_input(
                     "Name",
                     placeholder="For example: Biology lecture notes",
-                    key=f"run_style_name:{run_nonce}",
+                    key=f"new_style_name:{nonce}",
                 )
+                brief = st.text_area(
+                    "Style summary",
+                    height=160,
+                    placeholder=(
+                        "Describe length, headings, math habits, and what the "
+                        "notes avoid."
+                    ),
+                    key=f"new_style_brief:{nonce}",
+                )
+                add_med_col, add_long_col = st.columns(2, gap="medium")
+                with add_med_col:
+                    add_median = st.number_input(
+                        "Median words",
+                        min_value=0,
+                        step=50,
+                        value=0,
+                        help="Optional target length for the drafter.",
+                        key=f"new_style_median:{nonce}",
+                    )
+                with add_long_col:
+                    add_longest = st.number_input(
+                        "Longest words",
+                        min_value=0,
+                        step=50,
+                        value=0,
+                        help="Optional ceiling. Defaults to Median words if left at 0.",
+                        key=f"new_style_longest:{nonce}",
+                    )
                 submitted = st.form_submit_button(
                     "Save style",
                     icon=":material/save:",
                 )
                 if submitted:
                     try:
+                        median_val, longest_val = _normalize_word_targets(
+                            add_median, add_longest
+                        )
                         saved = save_profile(
                             name,
                             brief,
-                            measured_text=measured_text,
-                            median_words=median_words,
-                            longest_words=longest_words,
+                            median_words=median_val,
+                            longest_words=longest_val,
                         )
                     except (ValueError, OSError) as error:
                         st.error(f"Could not save the style: {error}")
                     else:
-                        st.session_state[RUN_STYLE_FORM_NONCE_KEY] = (
-                            run_nonce + 1
-                        )
+                        st.session_state[STYLE_FORM_NONCE_KEY] = nonce + 1
                         st.session_state[STYLE_NOTICE_KEY] = (
                             f'Saved the style "{saved.name}".'
                         )

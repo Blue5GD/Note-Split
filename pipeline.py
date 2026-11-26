@@ -357,6 +357,26 @@ def draft_is_too_long(
     return draft_words > 1.5 * median_words and draft_words > longest_words
 
 
+def run_summarizer(
+    example_notes: str,
+    example_files: list[str] | None = None,
+    usage: TokenUsage | None = None,
+) -> dict:
+    """Measure example notes and run only the summarizer agent.
+
+    Checks the example notes first without calling the model. Returns a
+    dict with "brief" and "measured" so the caller can save a style
+    profile without running the drafter or card-creator.
+    """
+    check_example_notes(example_notes)
+    if not example_files:
+        measured = measure_example_notes([example_notes])
+    else:
+        measured = measure_example_notes(example_files)
+    brief = _style_brief(example_notes, measured["text"], usage=usage)
+    return {"brief": brief, "measured": measured}
+
+
 def run_pipeline(
     example_notes: str,
     source: str,
