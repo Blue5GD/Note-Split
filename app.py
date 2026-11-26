@@ -468,6 +468,76 @@ def _saved_style_panel() -> StyleProfile | None:
                     "The summarizer is skipped when this style is used, so "
                     "one paid model call is saved."
                 )
+            with st.expander(
+                "Edit style summary",
+                expanded=False,
+                icon=":material/edit:",
+            ):
+                current_words = (
+                    int(round(selected.median_words))
+                    if selected.median_words > 0
+                    else 0
+                )
+                with st.form(
+                    f"edit_style_profile:{selected.name}:{selected.saved_at}"
+                ):
+                    edited_brief = st.text_area(
+                        "Style summary",
+                        value=selected.brief,
+                        height=220,
+                        key=(
+                            f"edit_style_brief:"
+                            f"{selected.name}:{selected.saved_at}"
+                        ),
+                    )
+                    edited_words = st.number_input(
+                        "Typical words per note",
+                        min_value=0,
+                        step=50,
+                        value=current_words,
+                        help=(
+                            "Optional. Changing this updates the word-count "
+                            "target. Set to 0 for no word-count target."
+                        ),
+                        key=(
+                            f"edit_style_words:"
+                            f"{selected.name}:{selected.saved_at}"
+                        ),
+                    )
+                    save_edits = st.form_submit_button(
+                        "Save changes",
+                        icon=":material/save:",
+                    )
+                    if save_edits:
+                        try:
+                            target = (
+                                int(edited_words)
+                                if edited_words is not None
+                                and edited_words > 0
+                                else 0
+                            )
+                            if target == current_words:
+                                measured_text = selected.measured_text
+                                median_words = selected.median_words
+                                longest_words = selected.longest_words
+                            else:
+                                measured_text = ""
+                                median_words = float(target)
+                                longest_words = target
+                            saved = save_profile(
+                                selected.name,
+                                edited_brief,
+                                measured_text=measured_text,
+                                median_words=median_words,
+                                longest_words=longest_words,
+                            )
+                        except (ValueError, OSError) as error:
+                            st.error(f"Could not save the style: {error}")
+                        else:
+                            st.session_state[STYLE_NOTICE_KEY] = (
+                                f'Updated the style "{saved.name}".'
+                            )
+                            st.rerun()
             with st.popover("Delete style", icon=":material/delete:"):
                 st.caption(f'Delete "{selected.name}" from this computer?')
                 confirmed = st.checkbox(
