@@ -816,7 +816,12 @@ with generate_tab:
                     st.session_state.pop(RESTORED_KEY, None)
                     st.rerun()
         if note is not None:
-            with st.expander("Note", expanded=True, icon=":material/article:"):
+            note_words = len(note.split())
+            with st.expander(
+                f"Note ({_token_count(note_words, 'word')})",
+                expanded=True,
+                icon=":material/article:",
+            ):
                 st.markdown(note)
         if cards is not None:
             with st.expander("Cards", expanded=True, icon=":material/style:"):
