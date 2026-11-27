@@ -734,6 +734,8 @@ with generate_tab:
                             )
 
                         result["usage"] = usage.as_dict()
+                        if run_mode != "cards" and selected_profile is not None:
+                            result["style_name"] = selected_profile.name
                         finished_at = time.time()
                         result["finished_at_epoch"] = finished_at
                         st.session_state["result"] = result
@@ -771,6 +773,9 @@ with generate_tab:
                 "No credits were spent."
             )
         _show_usage(result.get("usage"))
+        style_name = result.get("style_name")
+        if isinstance(style_name, str) and style_name.strip() != "":
+            st.caption(f":material/palette: Style: {style_name}")
         if note is not None or apkg_bytes is not None:
             with st.container(horizontal=True, gap="small"):
                 if note is not None:
